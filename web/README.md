@@ -54,7 +54,7 @@ Until the game data is loaded in chunks, a development loader in `web/pre.js` do
 http://127.0.0.1:8765/Yakumo.html?game=game&env=MHP3RD_NO_AUDIO=1,MHP3RD_PERF=log
 ```
 
-`env=` sets environment variables, comma-separated. The saves of that game folder (`/game/ms0`) are the data directory's, so they persist.
+`env=` sets environment variables, comma-separated. To serve it from a machine of your own, see `web/nginx.conf.example`. The saves of that game folder (`/game/ms0`) are the data directory's, so they persist.
 
 The game's text needs a font with Japanese in it, and a page has no system fonts. Put Noto Sans CJK (SIL Open Font License) at `build/web/fonts/NotoSansCJK-Regular.ttc`, for example from Debian's `fonts-noto-cjk` package, and the page loads it where the game looks on Linux. Without it the game's text is blank.
 
@@ -75,6 +75,6 @@ How the port fits in:
 | M1 | Bootstrap compiled to WebAssembly opens an SDL3 canvas | Done: the setup screens run in Chrome with WebGPU and JSPI |
 | M2 | Browser main loop, stack, persistent config and saves | Done: JSPI keeps the tab responsive and the data directory persists in IndexedDB. Open risk for M3: the JSPI stack holds about 1 MB (about 15,700 small frames in Chrome), and each guest call nests one large generated function |
 | M3 | Generated code linked, overlays interpreted, game data loaded in chunks; frames run without rendering | Frames run: 30 fps at 100% speed in Chrome, 60 display lists a second, nothing drawn yet. The JSPI stack is enough so far. Game data still comes whole, not in chunks |
-| M4 | WebGPU renderer; menus visible | |
-| M5 | Deployed behind authentication | |
+| M4 | WebGPU renderer; menus visible | Done: the game draws, in town and on a quest; keyboard, mouse buttons and a gamepad reach it; text uses Noto Sans CJK; saves persist. Missing: render targets as textures, points and lines, movies, pointer capture |
+| M5 | Deployed behind authentication | Done: Nginx with a password, HTTPS and the isolation headers (`web/nginx.conf.example`); the files go up with `tar` over SSH |
 | M6+ | FFmpeg, compiled overlays, threads, CI | |
