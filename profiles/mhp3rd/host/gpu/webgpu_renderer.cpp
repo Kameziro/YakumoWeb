@@ -12,12 +12,13 @@
 // control back to the browser until its next animation frame.
 //
 // The keyboard and the first gamepad reach the game through the player's
-// bindings, as in the Vulkan renderer. Not implemented yet: touch and the
-// mouse for the game, the lead-in of L, more than one gamepad; points and
-// lines; render targets sampled as textures, write back to guest memory and
-// frames the game uploads itself (movies); capture; frame interpolation;
-// texture packs and the sharper interface textures. Those members keep
-// neutral values and do nothing.
+// bindings, as in the Vulkan renderer, and mouse buttons. A frame the game
+// uploads itself (a movie) is shown in place of its target. Not implemented
+// yet: touch and mouse motion for the game, the lead-in of L, more than one
+// gamepad; points and lines; render targets sampled as textures, write back
+// to guest memory; capture; frame interpolation; texture packs and the
+// sharper interface textures. Those members keep neutral values and do
+// nothing.
 
 #include "gpu/vulkan_renderer.hpp"
 
@@ -424,6 +425,13 @@ struct VulkanRenderer::Impl {
     std::vector<GpuVertex> scratch;
     std::uint32_t shown_target{};
     bool shown_valid{};
+    // A frame the game wrote itself (the movie player, upload_frame): shown
+    // instead of the target at movie_address until the GE draws there again.
+    Texture movie;
+    std::uint32_t movie_width{};
+    std::uint32_t movie_height{};
+    std::uint32_t movie_address{};
+    bool movie_valid{};
     std::uint64_t draws{};
     std::uint64_t texture_clock{};
     std::vector<std::uint32_t> decoded;
@@ -902,14 +910,17 @@ void VulkanRenderer::Impl::finish_frame(bool show_game) {
     desc.colorAttachments = &color;
     WGPURenderPassEncoder canvas_pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
     const auto shown = show_game && shown_valid ? targets.find(shown_target) : targets.end();
-    if (shown != targets.end() && ge_ready) {
+    const bool movie_shown = show_game && shown_valid && movie_valid && movie_address == shown_target &&
+                             movie.group != nullptr;
+    if ((shown != targets.end() || movie_shown) && ge_ready) {
         // The PSP's shape, as large as the canvas allows, centred.
         const float scale = std::min(static_cast<float>(width) / kPspWidth, static_cast<float>(height) / kPspHeight);
         const float w = std::floor(kPspWidth * scale), h = std::floor(kPspHeight * scale);
         wgpuRenderPassEncoderSetViewport(canvas_pass, std::floor((width - w) * 0.5f), std::floor((height - h) * 0.5f),
                                          w, h, 0.0f, 1.0f);
         wgpuRenderPassEncoderSetPipeline(canvas_pass, blit_pipeline);
-        wgpuRenderPassEncoderSetBindGroup(canvas_pass, 0, shown->second.sample_group, 0, nullptr);
+        wgpuRenderPassEncoderSetBindGroup(canvas_pass, 0, movie_shown ? movie.group : shown->second.sample_group, 0,
+                                          nullptr);
         wgpuRenderPassEncoderDraw(canvas_pass, 3, 1, 0, 0);
         wgpuRenderPassEncoderSetViewport(canvas_pass, 0.0f, 0.0f, static_cast<float>(width),
                                          static_cast<float>(height), 0.0f, 1.0f);
@@ -1146,6 +1157,7 @@ void VulkanRenderer::Impl::draw(const DrawCall &call, const GuestMemory &memory)
     if (call.texture.enabled && !call.clear_mode) texture = texture_group(memory, call.texture);
 
     if (pass == nullptr || pass_target != call.target.color_address) begin_pass(call.target.color_address);
+    if (movie_valid && movie_address == call.target.color_address) movie_valid = false;
 
     const std::uint64_t vertex_offset = vertex_bytes.size();
     vertex_bytes.resize(vertex_offset + vertex_size);
@@ -1392,7 +1404,28 @@ void VulkanRenderer::set_frame_rate(settings::FrameRate) {}
 void VulkanRenderer::set_frame_rate_auto(bool) {}
 float VulkanRenderer::display_refresh() const noexcept { return 0.0f; }
 double VulkanRenderer::frame_rate_now() const noexcept { return 30.0; }
-void VulkanRenderer::upload_frame(std::uint32_t, const std::uint8_t *, std::uint32_t, std::uint32_t, std::uint32_t) {}
+void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint8_t *pixels, std::uint32_t width,
+                                  std::uint32_t height, std::uint32_t stride) {
+    if (!impl_ || !impl_->ge_ready || pixels == nullptr || width == 0u || height == 0u || stride < width) return;
+    Impl &impl = *impl_;
+    if (impl.movie.texture == nullptr || impl.movie_width != width || impl.movie_height != height) {
+        impl.release_texture(impl.movie);
+        std::vector<std::uint32_t> black(static_cast<std::size_t>(width) * height, 0xFF000000u);
+        impl.movie = impl.make_texture(width, height, black.data());
+        impl.movie_width = width;
+        impl.movie_height = height;
+    }
+    WGPUTexelCopyTextureInfo destination = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+    destination.texture = impl.movie.texture;
+    WGPUTexelCopyBufferLayout layout = WGPU_TEXEL_COPY_BUFFER_LAYOUT_INIT;
+    layout.bytesPerRow = stride * 4u;
+    layout.rowsPerImage = height;
+    const WGPUExtent3D size{width, height, 1u};
+    const std::size_t bytes = static_cast<std::size_t>(stride) * 4u * (height - 1u) + static_cast<std::size_t>(width) * 4u;
+    wgpuQueueWriteTexture(impl.queue, &destination, pixels, bytes, &layout, &size);
+    impl.movie_address = display_address;
+    impl.movie_valid = true;
+}
 
 bool VulkanRenderer::capture_frame(const std::filesystem::path &) { return false; }
 bool VulkanRenderer::read_frame(std::vector<std::uint8_t> &, std::uint32_t &, std::uint32_t &) { return false; }
