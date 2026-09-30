@@ -370,6 +370,9 @@ if(EMSCRIPTEN)
         # Workers started with the page: a std::thread then starts at once,
         # without waiting for the page's thread to give the browser a turn.
         -sPTHREAD_POOL_SIZE=8
+        # The audio output runs on the browser's audio thread (audio_sink.cpp).
+        -sAUDIO_WORKLET=1
+        -sWASM_WORKERS=1
         -sEXPORTED_RUNTIME_METHODS=FS
         -lidbfs.js
         --pre-js "${PROJECT_SOURCE_DIR}/web/pre.js"

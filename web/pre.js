@@ -17,6 +17,7 @@ const kDataDirectory = "/libsdl/Yakumo/MHP3rd";
   const Base = globalThis.AudioContext || globalThis.webkitAudioContext;
   if (!Base) return;
   const contexts = [];
+  Module.audioContexts = contexts;  // for inspection from the console
   globalThis.AudioContext = class extends Base {
     constructor(...args) {
       super(...args);
@@ -140,11 +141,6 @@ Module.preRun.push(() => {
 // game folder (/game/ms0, the saves) is the one in the data directory, so it
 // is kept.
 Module.preRun.push(() => {
-  // SDL feeds the page's audio on the page's thread, which the game keeps
-  // busy for most of each frame: a longer buffer (4096 frames, about 93 ms)
-  // rides out the gaps between frames instead of running dry. ?env= can set
-  // another size.
-  ENV.SDL_AUDIO_DEVICE_SAMPLE_FRAMES = "4096";
   const params = new URLSearchParams(location.search);
   for (const pair of (params.get("env") || "").split(",")) {
     const at = pair.indexOf("=");
