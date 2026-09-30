@@ -48,7 +48,7 @@ python web/serve.py build/web 8765
 
 `serve.py` listens on 127.0.0.1 only and sends the cross-origin isolation headers that threads need (`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`). A real server must send them too.
 
-Until the game data is loaded in chunks, a development loader in `web/pre.js` downloads a game folder whole (about 1.3 GB, held in memory). Put `EBOOT.ELF` (from the data directory after `--install`) and `disc.iso` in `build/web/game/`, which Git ignores, and open:
+Until the game data is loaded in chunks, a development loader in `web/pre.js` downloads a game folder whole (about 1.3 GB, held in memory). It downloads each file once, with its progress shown, and keeps it in the browser's origin private file system (OPFS); later visits read it from there, in seconds. After the files on the server change, bump `kStoreFolder` in `web/pre.js`, or clear the site's data in the browser. Put `EBOOT.ELF` (from the data directory after `--install`) and `disc.iso` in `build/web/game/`, which Git ignores, and open:
 
 ```
 http://127.0.0.1:8765/Yakumo.html?game=game&env=MHP3RD_NO_AUDIO=1,MHP3RD_PERF=log
