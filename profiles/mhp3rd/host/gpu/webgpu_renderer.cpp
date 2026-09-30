@@ -11,7 +11,9 @@
 // the canvas with the interface (Dear ImGui) over it. Each present gives
 // control back to the browser until its next animation frame.
 //
-// Not implemented yet: the pad, touch and the mouse for the game; points and
+// The keyboard and the first gamepad reach the game through the player's
+// bindings, as in the Vulkan renderer. Not implemented yet: touch and the
+// mouse for the game, the lead-in of L, more than one gamepad; points and
 // lines; render targets sampled as textures, write back to guest memory and
 // frames the game uploads itself (movies); capture; frame interpolation;
 // texture packs and the sharper interface textures. Those members keep
@@ -22,6 +24,8 @@
 #include "gpu/game_hud.hpp"
 #include "gpu/texture_decode.hpp"
 #include "gpu/webgpu_shaders.hpp"
+#include "input/bindings.hpp"
+#include "input/chords.hpp"
 #include "install/user_data.hpp"
 #include "settings/settings.hpp"
 
@@ -38,6 +42,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -249,6 +254,90 @@ void clamp_through_quad(std::vector<GpuVertex> &vertices, std::size_t first, flo
         set_uv_rect(vertices[i], u_min + inset_u, v_min + inset_v, u_max - inset_u, v_max - inset_v);
 }
 
+// The gamepad, as vulkan_renderer.cpp reads it (pad_tuning, pad_input_held
+// and read_gamepad there).
+struct PadTuning {
+    float dead_zone{0.15f};
+    float trigger{0.25f};
+    float right_stick{0.5f};
+    settings::RightStick right_stick_mode{settings::RightStick::Camera};
+    bool invert_x{};
+    bool invert_y{};
+    bool confirm_south{};
+    bool swap_sticks{};
+};
+
+PadTuning pad_tuning() {
+    const settings::Settings &player = settings::current();
+    PadTuning value{};
+    value.dead_zone = player.dead_zone;
+    value.trigger = player.trigger;
+    value.right_stick = player.right_stick_zone;
+    value.right_stick_mode = player.right_stick;
+    value.invert_x = player.invert_camera_x;
+    value.invert_y = player.invert_camera_y;
+    value.confirm_south = player.confirm_south;
+    value.swap_sticks = player.controls.swap_sticks;
+    return value;
+}
+
+bool pad_input_held(SDL_Gamepad *device, input::Binding binding, const PadTuning &tuning) {
+    int input = input::pad_input_of(binding);
+    if (input < 0) return false;
+    if (tuning.confirm_south) {
+        if (input == static_cast<int>(input::PadInput::South)) input = static_cast<int>(input::PadInput::East);
+        else if (input == static_cast<int>(input::PadInput::East)) input = static_cast<int>(input::PadInput::South);
+    }
+    if (input == static_cast<int>(input::PadInput::LeftTrigger) ||
+        input == static_cast<int>(input::PadInput::RightTrigger)) {
+        const SDL_GamepadAxis axis = input == static_cast<int>(input::PadInput::LeftTrigger)
+                                         ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+                                         : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+        return static_cast<float>(SDL_GetGamepadAxis(device, axis)) / 32767.0f > tuning.trigger;
+    }
+    return input < static_cast<int>(input::PadInput::ButtonCount) &&
+           SDL_GetGamepadButton(device, static_cast<SDL_GamepadButton>(input));
+}
+
+void read_gamepad(SDL_Gamepad *device, const input::PadState &mapped, PadState &pad, int &analog_x,
+                  int &analog_y) {
+    const PadTuning tuning = pad_tuning();
+    std::uint32_t &buttons = pad.buttons;
+    buttons |= mapped.buttons;
+    pad.fast_forward = pad.fast_forward || mapped.fast_forward;
+    analog_x += mapped.stick_x;
+    analog_y += mapped.stick_y;
+    const auto axis = [&](SDL_GamepadAxis id) {
+        return std::clamp(static_cast<float>(SDL_GetGamepadAxis(device, id)) / 32767.0f, -1.0f, 1.0f);
+    };
+    const SDL_GamepadAxis camera_x_axis = tuning.swap_sticks ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
+    const SDL_GamepadAxis camera_y_axis = tuning.swap_sticks ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
+    const SDL_GamepadAxis move_x_axis = tuning.swap_sticks ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX;
+    const SDL_GamepadAxis move_y_axis = tuning.swap_sticks ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
+    const float right_x = std::clamp(axis(camera_x_axis) + static_cast<float>(mapped.camera_x) / 127.0f, -1.0f, 1.0f);
+    const float right_y = std::clamp(axis(camera_y_axis) + static_cast<float>(mapped.camera_y) / 127.0f, -1.0f, 1.0f);
+    if (tuning.right_stick_mode == settings::RightStick::DPad) {
+        if (right_x < -tuning.right_stick) buttons |= 0x0080u;
+        if (right_x > tuning.right_stick) buttons |= 0x0020u;
+        if (right_y < -tuning.right_stick) buttons |= 0x0010u;
+        if (right_y > tuning.right_stick) buttons |= 0x0040u;
+    }
+    const auto deflect = [&](float x, float y, std::uint8_t &out_x, std::uint8_t &out_y) {
+        const float length = std::sqrt(x * x + y * y);
+        if (length <= tuning.dead_zone) return;
+        const float scale = std::min((length - tuning.dead_zone) / (1.0f - tuning.dead_zone), 1.0f) / length;
+        out_x = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(x * scale * 127.0f), 0, 255));
+        out_y = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(y * scale * 127.0f), 0, 255));
+    };
+    if (tuning.right_stick_mode == settings::RightStick::Camera)
+        deflect(tuning.invert_x ? -right_x : right_x, tuning.invert_y ? -right_y : right_y, pad.right_x, pad.right_y);
+    std::uint8_t nub_x = 0x80u;
+    std::uint8_t nub_y = 0x80u;
+    deflect(axis(move_x_axis), axis(move_y_axis), nub_x, nub_y);
+    analog_x += static_cast<int>(nub_x) - 0x80;
+    analog_y += static_cast<int>(nub_y) - 0x80;
+}
+
 } // namespace
 
 struct VulkanRenderer::Impl {
@@ -272,6 +361,22 @@ struct VulkanRenderer::Impl {
     std::string device_name;
     input::touch::Controls touch;
     input::touch::ActionControls action_touch;
+
+    // Input for the game.
+    SDL_Gamepad *gamepad{};
+    SDL_JoystickID gamepad_id{};
+    input::Resolver keys_resolver;
+    input::Resolver pad_resolver;
+    input::PadState typed{};
+    input::PadState mapped{};
+    PadState pad{};
+    bool game_input{true};
+    bool free_camera{};
+    bool suppress_held{};
+    std::uint32_t suppressed_buttons{};
+    void open_gamepad(SDL_JoystickID id);
+    void close_gamepad(SDL_JoystickID id);
+    void sample_pad();
 
     // The game's picture.
     struct Target {
@@ -1095,20 +1200,104 @@ std::uint64_t VulkanRenderer::frames_presented() const noexcept { return impl_ ?
 std::uint64_t VulkanRenderer::draws_submitted() const noexcept { return impl_ ? impl_->draws : 0u; }
 CameraReading VulkanRenderer::camera() const noexcept { return {}; }
 
+void VulkanRenderer::Impl::open_gamepad(SDL_JoystickID id) {
+    if (gamepad != nullptr) return;
+    gamepad = SDL_OpenGamepad(id);
+    if (gamepad == nullptr) return;
+    gamepad_id = id;
+    const char *name = SDL_GetGamepadName(gamepad);
+    std::cout << "[pad] " << (name != nullptr ? name : "gamepad") << " drives the game\n";
+}
+
+void VulkanRenderer::Impl::close_gamepad(SDL_JoystickID id) {
+    if (gamepad == nullptr || id != gamepad_id) return;
+    SDL_CloseGamepad(gamepad);
+    gamepad = nullptr;
+    gamepad_id = 0;
+    pad_resolver.reset();
+    mapped = {};
+    int count = 0;
+    if (SDL_JoystickID *ids = SDL_GetGamepads(&count)) {
+        for (int i = 0; i < count && gamepad == nullptr; ++i) open_gamepad(ids[i]);
+        SDL_free(ids);
+    }
+}
+
+// The keyboard and the gamepad to the PSP pad, through the player's bindings,
+// as the Vulkan renderer's sample_pad() does. The page has the keys while it
+// has focus, so there is no window focus to check.
+void VulkanRenderer::Impl::sample_pad() {
+    const settings::Settings &player = settings::current();
+    const std::uint64_t now = SDL_GetTicks();
+    const bool *keys = SDL_GetKeyboardState(nullptr);
+    typed = keys_resolver.update(
+        input::Table{player.controls.keys, player.controls.combos, false},
+        [&](input::Binding binding) {
+            const int position = input::key_position(binding);
+            return position >= 0 && position < SDL_SCANCODE_COUNT && keys[position];
+        },
+        now, player.chord_window);
+    if (gamepad != nullptr) {
+        static const input::Chord kMenu =
+            input::chord(input::pad(input::PadInput::LeftStick), input::pad(input::PadInput::RightStick));
+        const PadTuning tuning = pad_tuning();
+        mapped = pad_resolver.update(
+            input::Table{player.controls.pad, player.controls.combos, true},
+            [&](input::Binding binding) { return pad_input_held(gamepad, binding, tuning); }, now,
+            player.chord_window, std::span<const input::Chord>(&kMenu, 1u));
+    }
+    if (!game_input || free_camera) {
+        pad = PadState{};
+        return;
+    }
+    PadState next{};
+    next.buttons = typed.buttons;
+    next.fast_forward = typed.fast_forward;
+    int analog_x = typed.stick_x;
+    int analog_y = typed.stick_y;
+    if (player.right_stick == settings::RightStick::Camera) {
+        next.right_x = static_cast<std::uint8_t>(0x80 + typed.camera_x);
+        next.right_y = static_cast<std::uint8_t>(0x80 + typed.camera_y);
+    } else if (player.right_stick == settings::RightStick::DPad) {
+        if (typed.camera_x < 0) next.buttons |= 0x0080u;
+        if (typed.camera_x > 0) next.buttons |= 0x0020u;
+        if (typed.camera_y < 0) next.buttons |= 0x0010u;
+        if (typed.camera_y > 0) next.buttons |= 0x0040u;
+    }
+    if (gamepad != nullptr) read_gamepad(gamepad, mapped, next, analog_x, analog_y);
+    next.analog_x = static_cast<std::uint8_t>(std::clamp(0x80 + analog_x, 0, 255));
+    next.analog_y = static_cast<std::uint8_t>(std::clamp(0x80 + analog_y, 0, 255));
+    // Buttons held when the game got its input back stay hidden from it until
+    // they are released.
+    if (suppress_held) {
+        suppressed_buttons = next.buttons;
+        suppress_held = false;
+    }
+    suppressed_buttons &= next.buttons;
+    next.buttons &= ~suppressed_buttons;
+    pad = next;
+}
+
 bool VulkanRenderer::pump_events() {
     if (!impl_ || impl_->window == nullptr) return false;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) impl_->quit = true;
         if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) impl_->configured = false;
+        if (event.type == SDL_EVENT_GAMEPAD_ADDED) impl_->open_gamepad(event.gdevice.which);
+        if (event.type == SDL_EVENT_GAMEPAD_REMOVED) impl_->close_gamepad(event.gdevice.which);
         if (impl_->event_hook && impl_->event_hook(event)) continue;
     }
+    impl_->sample_pad();
     return !impl_->quit;
 }
 
-// Input for the game: not ported yet.
-PadState VulkanRenderer::pad() const noexcept { return {}; }
-void VulkanRenderer::sample_pad() {}
+PadState VulkanRenderer::pad() const noexcept { return impl_ ? impl_->pad : PadState{}; }
+void VulkanRenderer::sample_pad() {
+    if (!impl_ || impl_->window == nullptr) return;
+    SDL_PumpEvents();
+    impl_->sample_pad();
+}
 MouseMotion VulkanRenderer::take_mouse_motion() noexcept { return {}; }
 bool VulkanRenderer::touch_controls_visible() const noexcept { return false; }
 const input::touch::Controls &VulkanRenderer::touch_controls() const { return impl_->touch; }
@@ -1126,8 +1315,16 @@ void VulkanRenderer::hold_frame(bool) {}
 void VulkanRenderer::set_event_hook(std::function<bool(const SDL_Event &)> hook) {
     if (impl_) impl_->event_hook = std::move(hook);
 }
-void VulkanRenderer::set_game_input(bool) {}
-void VulkanRenderer::set_free_camera(bool) {}
+void VulkanRenderer::set_game_input(bool enabled) {
+    if (!impl_) return;
+    if (enabled && !impl_->game_input) impl_->suppress_held = true;
+    impl_->game_input = enabled;
+}
+void VulkanRenderer::set_free_camera(bool flying) {
+    if (!impl_ || impl_->free_camera == flying) return;
+    if (!flying) impl_->suppress_held = true;
+    impl_->free_camera = flying;
+}
 FreeCameraControls VulkanRenderer::take_free_camera_controls() { return {}; }
 bool VulkanRenderer::take_screenshot_request() noexcept { return false; }
 bool VulkanRenderer::frame_step_held() const noexcept { return false; }
@@ -1203,7 +1400,7 @@ std::string VulkanRenderer::device_name() const { return impl_ ? impl_->device_n
 std::string VulkanRenderer::device_summary() const { return device_name(); }
 std::string VulkanRenderer::gpu_problem() const { return {}; }
 std::string VulkanRenderer::gpu_compat_status() const { return "Off"; }
-SDL_Gamepad *VulkanRenderer::gamepad() const noexcept { return nullptr; }
+SDL_Gamepad *VulkanRenderer::gamepad() const noexcept { return impl_ ? impl_->gamepad : nullptr; }
 
 bool VulkanRenderer::initialize_ui(std::string &error) {
     if (!impl_ || !impl_->ready) {
