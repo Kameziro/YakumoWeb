@@ -27,6 +27,7 @@
 #include "gpu/webgpu_shaders.hpp"
 #include "input/bindings.hpp"
 #include "input/chords.hpp"
+#include "perf/frame_stats.hpp"
 #include "install/user_data.hpp"
 #include "settings/settings.hpp"
 
@@ -193,6 +194,20 @@ WGPUCompareFunction to_compare(std::uint32_t function) {
     default: return WGPUCompareFunction_GreaterEqual;
     }
 }
+
+// What identifies a texture within one display list, whose memory cannot
+// change while it is walked: its content key is hashed once per list, as in
+// vulkan_renderer.cpp (TextureKeyInput there).
+struct TextureInput {
+    std::uint32_t address{};
+    std::uint32_t buffer_width{};
+    std::uint32_t size{};
+    std::uint32_t format{};
+    std::uint32_t clut_address{};
+    std::uint32_t clut_format{};
+    bool swizzled{};
+    auto operator<=>(const TextureInput &) const = default;
+};
 
 // The GE state a pipeline is made for.
 struct PipelineKey {
@@ -435,6 +450,18 @@ struct VulkanRenderer::Impl {
     std::uint64_t draws{};
     std::uint64_t texture_clock{};
     std::vector<std::uint32_t> decoded;
+    // Texture keys of the display list being walked (begin_display_list).
+    std::map<TextureInput, std::uint64_t> list_texture_keys;
+    // What the current pass was last given, so a draw sets only what changed:
+    // each WebGPU call is a call out of WebAssembly into the page.
+    WGPURenderPipeline bound_pipeline{};
+    WGPUBindGroup bound_texture{};
+    std::uint32_t bound_uniform{~0u};
+    std::array<float, 2> bound_depth{-1.0f, -1.0f};
+    std::array<std::uint32_t, 4> bound_scissor{};
+    std::uint32_t bound_blend_constant{~0u};
+    bool uniform_written{};
+    std::uint64_t last_uniform_offset{};
 
     bool request_device(std::string &error);
     void configure_surface();
@@ -798,7 +825,16 @@ void VulkanRenderer::Impl::release_texture(Texture &texture) {
 
 // The game's texture, decoded once per distinct content (texture_key).
 WGPUBindGroup VulkanRenderer::Impl::texture_group(const GuestMemory &memory, const TextureState &state) {
-    const std::uint64_t key = texture_key(memory, state);
+    const TextureInput input{state.address,
+                             state.buffer_width,
+                             static_cast<std::uint32_t>(state.width) << 16u | state.height,
+                             static_cast<std::uint32_t>(state.format),
+                             state.clut_address,
+                             state.clut_format,
+                             state.swizzled};
+    auto [entry, inserted] = list_texture_keys.try_emplace(input);
+    if (inserted) entry->second = texture_key(memory, state);
+    const std::uint64_t key = entry->second;
     if (const auto found = textures.find(key); found != textures.end()) {
         found->second.last_used = ++texture_clock;
         return found->second.group;
@@ -851,6 +887,17 @@ void VulkanRenderer::Impl::begin_pass(std::uint32_t address) {
     pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
     target->cleared = true;
     pass_target = address;
+    // A new pass starts with nothing set. The vertex buffer is set once for
+    // it, and each draw names its first vertex.
+    bound_pipeline = nullptr;
+    bound_texture = nullptr;
+    bound_uniform = ~0u;
+    bound_depth = {-1.0f, -1.0f};
+    bound_scissor = {~0u, ~0u, ~0u, ~0u};
+    bound_blend_constant = ~0u;
+    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex_buffer, 0, kVertexBufferBytes);
+    wgpuRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, static_cast<float>(target_width),
+                                     static_cast<float>(target_height), 0.0f, 1.0f);
 }
 
 void VulkanRenderer::Impl::flush() {
@@ -866,6 +913,7 @@ void VulkanRenderer::Impl::flush() {
     encoder = nullptr;
     vertex_bytes.clear();
     uniform_bytes.clear();
+    uniform_written = false;
 }
 
 void VulkanRenderer::Impl::finish_frame(bool show_game) {
@@ -1162,20 +1210,47 @@ void VulkanRenderer::Impl::draw(const DrawCall &call, const GuestMemory &memory)
     const std::uint64_t vertex_offset = vertex_bytes.size();
     vertex_bytes.resize(vertex_offset + vertex_size);
     std::memcpy(vertex_bytes.data() + vertex_offset, scratch.data(), vertex_size);
-    const std::uint64_t uniform_offset = uniform_bytes.size();
-    uniform_bytes.resize(uniform_offset + kUniformStride);
-    std::memcpy(uniform_bytes.data() + uniform_offset, &block, sizeof(block));
+    // Consecutive draws of one mesh often have the same block: keep the one
+    // already written.
+    if (!uniform_written ||
+        std::memcmp(uniform_bytes.data() + last_uniform_offset, &block, sizeof(block)) != 0) {
+        last_uniform_offset = uniform_bytes.size();
+        uniform_bytes.resize(last_uniform_offset + kUniformStride);
+        std::memcpy(uniform_bytes.data() + last_uniform_offset, &block, sizeof(block));
+        uniform_written = true;
+    }
 
-    wgpuRenderPassEncoderSetPipeline(pass, pipeline);
-    wgpuRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, full_w, full_h, near_depth, far_depth);
-    wgpuRenderPassEncoderSetScissorRect(pass, left, top, right - left, bottom - top);
-    wgpuRenderPassEncoderSetBlendConstant(pass, &blend_constant);
-    wgpuRenderPassEncoderSetBindGroup(pass, 0, texture, 0, nullptr);
-    const auto dynamic_offset = static_cast<std::uint32_t>(uniform_offset);
-    wgpuRenderPassEncoderSetBindGroup(pass, 1, draw_group, 1, &dynamic_offset);
-    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex_buffer, vertex_offset, vertex_size);
-    wgpuRenderPassEncoderDraw(pass, static_cast<std::uint32_t>(scratch.size()), 1, 0, 0);
+    if (pipeline != bound_pipeline) {
+        wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        bound_pipeline = pipeline;
+    }
+    if (bound_depth[0] != near_depth || bound_depth[1] != far_depth) {
+        wgpuRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, full_w, full_h, near_depth, far_depth);
+        bound_depth = {near_depth, far_depth};
+    }
+    const std::array<std::uint32_t, 4> scissor{left, top, right - left, bottom - top};
+    if (scissor != bound_scissor) {
+        wgpuRenderPassEncoderSetScissorRect(pass, scissor[0], scissor[1], scissor[2], scissor[3]);
+        bound_scissor = scissor;
+    }
+    if ((constant_color & 0x00FFFFFFu) != bound_blend_constant) {
+        wgpuRenderPassEncoderSetBlendConstant(pass, &blend_constant);
+        bound_blend_constant = constant_color & 0x00FFFFFFu;
+    }
+    if (texture != bound_texture) {
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, texture, 0, nullptr);
+        bound_texture = texture;
+    }
+    const auto dynamic_offset = static_cast<std::uint32_t>(last_uniform_offset);
+    if (dynamic_offset != bound_uniform) {
+        wgpuRenderPassEncoderSetBindGroup(pass, 1, draw_group, 1, &dynamic_offset);
+        bound_uniform = dynamic_offset;
+    }
+    wgpuRenderPassEncoderDraw(pass, static_cast<std::uint32_t>(scratch.size()), 1,
+                              static_cast<std::uint32_t>(vertex_offset / sizeof(GpuVertex)), 0);
     ++draws;
+    perf::count_draw();
+    perf::count_recorded_draws(1u);
 }
 
 VulkanRenderer::VulkanRenderer() : impl_(std::make_unique<Impl>()) {}
@@ -1374,7 +1449,9 @@ bool VulkanRenderer::window_capture_pending() const noexcept { return false; }
 void VulkanRenderer::begin_frame() {
     if (impl_ && impl_->ready) impl_->begin_recording();
 }
-void VulkanRenderer::begin_display_list() {}
+void VulkanRenderer::begin_display_list() {
+    if (impl_) impl_->list_texture_keys.clear();
+}
 bool VulkanRenderer::gpu_decode() const { return false; }
 bool VulkanRenderer::check_gpu_decode() const { return false; }
 void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
