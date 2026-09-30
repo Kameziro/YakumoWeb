@@ -2,7 +2,13 @@ set(MHP3RD_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # The AOT corpus is derived from the user's executable and is not committed.
 # Until scripts/generate.sh has produced it, link an empty registry instead.
-file(GLOB MHP3RD_GENERATED CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/generated/*.cpp")
+# MHP3RD_GENERATED_CODE=OFF links the empty registry even when a corpus exists,
+# for a quick bootstrap build of a new target such as the web port.
+option(MHP3RD_GENERATED_CODE "Link the generated AOT units when they exist" ON)
+set(MHP3RD_GENERATED)
+if(MHP3RD_GENERATED_CODE)
+    file(GLOB MHP3RD_GENERATED CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/generated/*.cpp")
+endif()
 if(MHP3RD_GENERATED)
     list(LENGTH MHP3RD_GENERATED MHP3RD_GENERATED_COUNT)
     message(STATUS "mhp3rd: ${MHP3RD_GENERATED_COUNT} generated AOT units")
@@ -83,7 +89,44 @@ endif()
 # profile still builds headless on a machine without them.
 option(MHP3RD_RENDERER "Build the Vulkan renderer" ON)
 set(MHP3RD_RENDERER_SOURCES)
-if(MHP3RD_RENDERER)
+set(MHP3RD_WEB_RENDERER OFF)
+if(MHP3RD_RENDERER AND EMSCRIPTEN)
+    # The web port (web/README.md): SDL3 and WebGPU from Emscripten's ports,
+    # and host/gpu/webgpu_renderer.cpp in place of the Vulkan renderer. The
+    # interface sources are the same as below.
+    set(MHP3RD_WEB_RENDERER ON)
+    set(MHP3RD_RENDERER_SOURCES
+        host/gpu/frame_interpolation.cpp
+        host/gpu/frame_pacing.cpp
+        host/gpu/mmpx.cpp
+        host/gpu/ui_textures.cpp
+        host/gpu/webgpu_renderer.cpp
+        host/input/gamepad_devices.cpp
+        host/platform/web_dialogs.cpp
+        host/ui/bindings_editor.cpp
+        host/ui/controllers_screen.cpp
+        host/ui/file_browser.cpp
+        host/ui/font_menu.cpp
+        host/ui/input_script.cpp
+        host/ui/layer.cpp
+        host/ui/menu.cpp
+        host/ui/layered_armor_screen.cpp
+        host/ui/mods_screen.cpp
+        host/ui/save_screen.cpp
+        host/ui/setup_screens.cpp
+        host/ui/text_input.cpp
+        host/ui/touch_editor.cpp
+        host/ui/touch_overlay.cpp
+        host/ui/texture_pack_screen.cpp
+        host/ui/widgets.cpp
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/backends/imgui_impl_sdl3.cpp
+        third_party/imgui/backends/imgui_impl_wgpu.cpp)
+    message(STATUS "mhp3rd: WebGPU renderer enabled (web)")
+elseif(MHP3RD_RENDERER)
     find_package(SDL3 QUIET)
     find_package(Vulkan QUIET)
     find_program(MHP3RD_GLSLANG NAMES glslangValidator glslang)
@@ -293,14 +336,35 @@ if(WIN32)
     target_sources(Yakumo PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Yakumo.rc")
 endif()
 if(MHP3RD_RENDERER)
-    add_dependencies(Yakumo mhp3rd_shaders mhp3rd_version)
+    if(MHP3RD_WEB_RENDERER)
+        add_dependencies(Yakumo mhp3rd_version)
+        target_compile_options(Yakumo PRIVATE --use-port=sdl3 --use-port=emdawnwebgpu)
+        target_link_options(Yakumo PRIVATE --use-port=sdl3 --use-port=emdawnwebgpu)
+    else()
+        add_dependencies(Yakumo mhp3rd_shaders mhp3rd_version)
+        target_link_libraries(Yakumo PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+    endif()
     # The sink opens its own SDL audio subsystem, so it only needs SDL to exist.
     target_compile_definitions(Yakumo PRIVATE MHP3RD_HAS_RENDERER=1 MHP3RD_HAS_SDL_AUDIO=1 MHP3RD_HAS_SDL=1)
     target_include_directories(Yakumo PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_version"
         "${MHP3RD_PROFILE_DIR}/third_party/imgui")
-    target_link_libraries(Yakumo PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+endif()
+if(EMSCRIPTEN)
+    # JSPI suspends the wasm stack while the browser takes its turn, so the
+    # port's blocking loops (the setup screens, the game's frames) keep their
+    # shape. The recompiled code nests deeply: the same 64 MiB stack as on
+    # Linux. The page comes from web/shell.html.
+    target_link_options(Yakumo PRIVATE
+        -sJSPI
+        -sSTACK_SIZE=64MB
+        -sINITIAL_MEMORY=256MB
+        -sALLOW_MEMORY_GROWTH=1
+        -sEXIT_RUNTIME=1
+        --shell-file "${PROJECT_SOURCE_DIR}/web/shell.html")
+    set_target_properties(Yakumo PROPERTIES SUFFIX ".html")
+    set_property(TARGET Yakumo APPEND PROPERTY LINK_DEPENDS "${PROJECT_SOURCE_DIR}/web/shell.html")
 endif()
 # The host only: the generated code never sees FFmpeg.
 mhp3rd_use_ffmpeg(Yakumo)

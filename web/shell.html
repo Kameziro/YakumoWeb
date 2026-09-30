@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yakumo</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d0d14; color: #c8c8d0; font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #canvas { flex: 1; width: 100%; min-height: 0; display: block; outline: none; }
+  #status { padding: 4px 8px; font-size: 12px; opacity: .7; }
+  #log { max-height: 20vh; overflow: auto; margin: 0; padding: 4px 8px; font: 11px ui-monospace, monospace;
+         background: #08080c; white-space: pre-wrap; }
+  #log:empty { display: none; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="status">Loading…</div>
+<pre id="log"></pre>
+<script>
+  // No JSPI means no way to suspend the game's loops: say so instead of hanging.
+  if (!("Suspending" in WebAssembly)) {
+    document.getElementById("status").textContent =
+      "This browser lacks WebAssembly JSPI. Use a current Chrome or Edge.";
+  }
+  if (!navigator.gpu) {
+    document.getElementById("status").textContent = "This browser lacks WebGPU. Use a current Chrome or Edge.";
+  }
+  const log = document.getElementById("log");
+  function append(text) {
+    log.textContent += text + "\n";
+    log.scrollTop = log.scrollHeight;
+  }
+  var Module = {
+    canvas: document.getElementById("canvas"),
+    print: (text) => { console.log(text); append(text); },
+    printErr: (text) => { console.error(text); append(text); },
+    setStatus: (text) => { document.getElementById("status").textContent = text || "Running"; },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
