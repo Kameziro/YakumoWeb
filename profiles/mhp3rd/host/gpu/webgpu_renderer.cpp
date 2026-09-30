@@ -14,8 +14,9 @@
 // The keyboard and the first gamepad reach the game through the player's
 // bindings, as in the Vulkan renderer, and mouse buttons. A frame the game
 // uploads itself (a movie) is shown in place of its target, and a texture in
-// a render target is sampled from a copy of that target. Not implemented yet:
-// touch and mouse motion for the game, the lead-in of L, more than one
+// a render target is sampled from a copy of that target. The mouse turns the
+// camera once the page holds the pointer lock (the first click). Not
+// implemented yet: touch for the game, the lead-in of L, more than one
 // gamepad; write back to guest memory; capture; frame interpolation; texture
 // packs and the sharper interface textures. Those members keep neutral values
 // and do nothing. Points and lines are not drawn, as in the Vulkan renderer.
@@ -393,6 +394,16 @@ struct VulkanRenderer::Impl {
     bool suppress_held{};
     std::uint32_t suppressed_buttons{};
     std::uint32_t mouse_buttons{};  // bit n: SDL mouse button n held over the game
+    // The pointer, captured for the game's camera with the page's pointer
+    // lock. A page can only take the lock on a click or a key, so it is asked
+    // for and taken with the next one; Esc always gives it back (the page
+    // never sees that press).
+    bool pointer_free{};
+    bool mouse_captured{};
+    bool lock_asked{};
+    bool was_locked{};
+    MouseMotion mouse_motion{};
+    void update_pointer();
     void open_gamepad(SDL_JoystickID id);
     void close_gamepad(SDL_JoystickID id);
     void sample_pad();
@@ -1533,23 +1544,53 @@ void VulkanRenderer::Impl::sample_pad() {
     pad = next;
 }
 
+void VulkanRenderer::Impl::update_pointer() {
+    const bool wanted = settings::current().mouse && game_input && !pointer_free;
+    EmscriptenPointerlockChangeEvent status{};
+    const bool locked = emscripten_get_pointerlock_status(&status) == EMSCRIPTEN_RESULT_SUCCESS && status.isActive;
+    // Lost (Esc, another window): ask again, for the next click.
+    if (was_locked && !locked) lock_asked = false;
+    was_locked = locked;
+    if (wanted && !locked && !lock_asked) {
+        emscripten_request_pointerlock(kCanvasSelector, true);
+        lock_asked = true;
+    }
+    if (!wanted) {
+        if (locked) emscripten_exit_pointerlock();
+        lock_asked = false;
+    }
+    const bool captured = wanted && locked;
+    if (captured == mouse_captured) return;
+    mouse_captured = captured;
+    mouse_motion = {};
+    mouse_buttons = 0u;
+    if (captured) suppress_held = true;
+}
+
 bool VulkanRenderer::pump_events() {
     if (!impl_ || impl_->window == nullptr) return false;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_MOUSE_MOTION && impl_->mouse_captured && event.motion.which != SDL_TOUCH_MOUSEID) {
+            impl_->mouse_motion.x += event.motion.xrel;
+            impl_->mouse_motion.y += event.motion.yrel;
+        }
         if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) impl_->quit = true;
         if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) impl_->configured = false;
         if (event.type == SDL_EVENT_GAMEPAD_ADDED) impl_->open_gamepad(event.gdevice.which);
         if (event.type == SDL_EVENT_GAMEPAD_REMOVED) impl_->close_gamepad(event.gdevice.which);
         // Mouse buttons press what the bindings put on them (the attacks by
-        // default) while the game has the input. Releases always count.
+        // default) while the pointer is the game's, as in the Vulkan renderer, so
+        // the click that takes the pointer lock does not attack; with the mouse
+        // setting off, whenever the game has the input. Releases always count.
         if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button < 32u)
             impl_->mouse_buttons &= ~(1u << event.button.button);
         if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button < 32u && impl_->game_input &&
-            event.button.which != SDL_TOUCH_MOUSEID)
+            (impl_->mouse_captured || !settings::current().mouse) && event.button.which != SDL_TOUCH_MOUSEID)
             impl_->mouse_buttons |= 1u << event.button.button;
         if (impl_->event_hook && impl_->event_hook(event)) continue;
     }
+    impl_->update_pointer();
     impl_->sample_pad();
     return !impl_->quit;
 }
@@ -1560,14 +1601,19 @@ void VulkanRenderer::sample_pad() {
     SDL_PumpEvents();
     impl_->sample_pad();
 }
-MouseMotion VulkanRenderer::take_mouse_motion() noexcept { return {}; }
+MouseMotion VulkanRenderer::take_mouse_motion() noexcept {
+    if (!impl_) return {};
+    return std::exchange(impl_->mouse_motion, MouseMotion{});
+}
 bool VulkanRenderer::touch_controls_visible() const noexcept { return false; }
 const input::touch::Controls &VulkanRenderer::touch_controls() const { return impl_->touch; }
 const input::touch::ActionControls &VulkanRenderer::action_touch_controls() const { return impl_->action_touch; }
 MouseMotion VulkanRenderer::take_touch_motion() noexcept { return {}; }
 bool VulkanRenderer::take_touch_menu() noexcept { return false; }
-bool VulkanRenderer::mouse_captured() const noexcept { return false; }
-void VulkanRenderer::set_pointer_free(bool) {}
+bool VulkanRenderer::mouse_captured() const noexcept { return impl_ && impl_->mouse_captured; }
+void VulkanRenderer::set_pointer_free(bool free) {
+    if (impl_) impl_->pointer_free = free;
+}
 void VulkanRenderer::set_scripted_key(int, bool) {}
 void VulkanRenderer::set_scripted_input(bool) {}
 void VulkanRenderer::request_quit() noexcept {
