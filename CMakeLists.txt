@@ -8,6 +8,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(cmake/BuildLock.cmake)
 
+# The web port (web/README.md): errors are C++ exceptions, which Emscripten
+# turns into an abort unless every unit is built with WebAssembly exceptions,
+# and the host starts std::threads, which need shared memory in every unit.
+if(EMSCRIPTEN)
+    add_compile_options(-fwasm-exceptions -pthread)
+    add_link_options(-fwasm-exceptions -pthread)
+endif()
+
 # A compiler cache turns a lost .ninja_deps, a clean or a regenerated corpus
 # into seconds of cache hits instead of a full rebuild of the generated units.
 option(PSPRECOMP_CCACHE "Compile through ccache when it is installed" ON)

@@ -114,8 +114,13 @@ void adhoc_shutdown() noexcept {
         state.port = 0u;
     } catch (...) {
     }
-    adhoc::Discovery::get().shutdown();
-    adhoc::Client::get().shutdown();
+    // Also where threads cannot be joined (the web port has none): a throw
+    // here would end the program before the caller reports why it stopped.
+    try {
+        adhoc::Discovery::get().shutdown();
+        adhoc::Client::get().shutdown();
+    } catch (...) {
+    }
 }
 
 void adhoc_join(const std::string &address) {

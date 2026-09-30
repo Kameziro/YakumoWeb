@@ -357,12 +357,19 @@ if(EMSCRIPTEN)
     # shape. The recompiled code nests deeply: the same 64 MiB stack as on
     # Linux. The page comes from web/shell.html; web/pre.js keeps the data
     # directory in IndexedDB.
+    # wasm-opt at -O3 takes minutes on the generated code; a lower level here
+    # links much faster while iterating.
+    set(MHP3RD_WEB_LINK_OPT "" CACHE STRING "Optimization flag for the web link only, for example -O1 (empty: the build type's)")
     target_link_options(Yakumo PRIVATE
+        ${MHP3RD_WEB_LINK_OPT}
         -sJSPI
         -sSTACK_SIZE=64MB
         -sINITIAL_MEMORY=256MB
         -sALLOW_MEMORY_GROWTH=1
         -sEXIT_RUNTIME=1
+        # Workers started with the page: a std::thread then starts at once,
+        # without waiting for the page's thread to give the browser a turn.
+        -sPTHREAD_POOL_SIZE=8
         -sEXPORTED_RUNTIME_METHODS=FS
         -lidbfs.js
         --pre-js "${PROJECT_SOURCE_DIR}/web/pre.js"

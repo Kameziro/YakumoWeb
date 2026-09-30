@@ -329,7 +329,13 @@ bool VulkanRenderer::present(std::uint32_t, std::optional<std::chrono::steady_cl
     return true;
 }
 void VulkanRenderer::present_due() {}
-void VulkanRenderer::present_until(std::chrono::steady_clock::time_point) {}
+// The kernel's idle hook: it is about to sleep until `wake` to keep the game
+// at PSP speed. On the page's thread a sleep would spin and freeze the tab, so
+// give the browser the time instead; the sleep that follows finds it passed.
+void VulkanRenderer::present_until(std::chrono::steady_clock::time_point wake) {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(wake - std::chrono::steady_clock::now());
+    if (left.count() >= 1) emscripten_sleep(static_cast<unsigned>(left.count()));
+}
 void VulkanRenderer::pause_interpolation() {}
 void VulkanRenderer::set_still(bool) {}
 void VulkanRenderer::set_fast_forward(bool) {}
