@@ -11,6 +11,24 @@ Module.preRun = Module.preRun || [];
 
 const kDataDirectory = "/libsdl/Yakumo/MHP3rd";
 
+// Browsers start audio suspended until the page gets a click, a tap or a key.
+// Every AudioContext the program makes is resumed on the next one of those.
+(() => {
+  const Base = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!Base) return;
+  const contexts = [];
+  globalThis.AudioContext = class extends Base {
+    constructor(...args) {
+      super(...args);
+      contexts.push(this);
+    }
+  };
+  const resume = () => {
+    for (const context of contexts) if (context.state === "suspended") context.resume().catch(() => {});
+  };
+  for (const type of ["pointerdown", "keydown", "touchstart"]) addEventListener(type, resume, { capture: true });
+})();
+
 // Big files come from the browser's own storage after the first visit: the
 // origin private file system (OPFS) keeps each one on disk, and asking for
 // persistent storage keeps the browser from dropping them when space runs
@@ -122,6 +140,11 @@ Module.preRun.push(() => {
 // game folder (/game/ms0, the saves) is the one in the data directory, so it
 // is kept.
 Module.preRun.push(() => {
+  // SDL feeds the page's audio on the page's thread, which the game keeps
+  // busy for most of each frame: a longer buffer (4096 frames, about 93 ms)
+  // rides out the gaps between frames instead of running dry. ?env= can set
+  // another size.
+  ENV.SDL_AUDIO_DEVICE_SAMPLE_FRAMES = "4096";
   const params = new URLSearchParams(location.search);
   for (const pair of (params.get("env") || "").split(",")) {
     const at = pair.indexOf("=");

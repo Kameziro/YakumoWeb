@@ -32,7 +32,7 @@ profiles/mhp3rd/scripts/generate.sh out/linux
 
 ```bash
 emcmake cmake -S . -B out/web -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=mhp3rd \
-    -DMHP3RD_FFMPEG=OFF -DPSPRECOMP_BUILD_TESTS=OFF -DPSPRECOMP_BUILD_PROFILE_TESTS=OFF \
+    -DMHP3RD_FFMPEG=bundled -DPSPRECOMP_BUILD_TESTS=OFF -DPSPRECOMP_BUILD_PROFILE_TESTS=OFF \
     -DMHP3RD_WEB_LINK_OPT=-O1
 cmake --build out/web --target Yakumo
 mkdir -p build/web && cp out/web/bin/Yakumo.* build/web/
@@ -77,4 +77,4 @@ How the port fits in:
 | M3 | Generated code linked, overlays interpreted, game data loaded in chunks; frames run without rendering | Frames run: 30 fps at 100% speed in Chrome, 60 display lists a second, nothing drawn yet. The JSPI stack is enough so far. Game data still comes whole, not in chunks |
 | M4 | WebGPU renderer; menus visible | Done: the game draws, in town and on a quest; keyboard, mouse buttons and a gamepad reach it; text uses Noto Sans CJK; saves persist. Missing: render targets as textures, points and lines, movies, pointer capture |
 | M5 | Deployed behind authentication | Done: Nginx with a password, HTTPS and the isolation headers (`web/nginx.conf.example`); the files go up with `tar` over SSH |
-| M6+ | FFmpeg, compiled overlays, threads, CI | |
+| M6+ | FFmpeg, compiled overlays, threads, CI | FFmpeg: built for the web and linked statically (LGPL-2.1-or-later; the build is reproducible from this tree, so it can be relinked). Threads: done in M3. Next: compiled overlays, CI |
