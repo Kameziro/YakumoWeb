@@ -25,14 +25,14 @@ cmake -S . -B out/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=
 cmake --build out/linux --target Yakumo
 out/linux/bin/Yakumo --install /iso/game.iso --in-place
 profiles/mhp3rd/scripts/prepare_game.sh /iso/game.iso ~/.local/share/Yakumo/MHP3rd/EBOOT.ELF
-profiles/mhp3rd/scripts/generate.sh
+profiles/mhp3rd/scripts/generate.sh out/linux
 ```
 
 ## Milestones
 
 | # | Milestone | Status |
 | --- | --- | --- |
-| M0 | Docker image; native bootstrap, `--install` and `generate.sh` in the container | Bootstrap builds; install and generate not yet run |
+| M0 | Docker image; native bootstrap, `--install` and `generate.sh` in the container | Done |
 | M1 | Bootstrap compiled to WebAssembly opens an SDL3 canvas | |
 | M2 | Browser main loop, stack, persistent config and saves | |
 | M3 | Generated code linked, overlays interpreted, game data loaded in chunks; frames run without rendering | |
