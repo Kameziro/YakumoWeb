@@ -8,7 +8,9 @@
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #0d0d14; color: #c8c8d0; font: 14px system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
-  #canvas { flex: 1; width: 100%; min-height: 0; display: block; outline: none; }
+  /* The program sizes the canvas to #screen each frame. */
+  #screen { flex: 1; min-height: 0; overflow: hidden; }
+  #canvas { display: block; outline: none; }
   #status { padding: 4px 8px; font-size: 12px; opacity: .7; }
   #log { max-height: 20vh; overflow: auto; margin: 0; padding: 4px 8px; font: 11px ui-monospace, monospace;
          background: #08080c; white-space: pre-wrap; }
@@ -16,7 +18,7 @@
 </style>
 </head>
 <body>
-<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="screen"><canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas></div>
 <div id="status">Loading…</div>
 <pre id="log"></pre>
 <script>

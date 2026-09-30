@@ -31,6 +31,7 @@
 
 #include <SDL3/SDL.h>
 #include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
 #include "imgui.h"
@@ -54,6 +55,7 @@ namespace {
 constexpr std::uint32_t kPspWidth = 480u;
 constexpr std::uint32_t kPspHeight = 272u;
 constexpr const char *kCanvasSelector = "#canvas";
+constexpr const char *kScreenSelector = "#screen";
 
 WGPUStringView view_of(const char *text) { return WGPUStringView{text, std::strlen(text)}; }
 
@@ -374,6 +376,7 @@ struct VulkanRenderer::Impl {
     bool free_camera{};
     bool suppress_held{};
     std::uint32_t suppressed_buttons{};
+    std::uint32_t mouse_buttons{};  // bit n: SDL mouse button n held over the game
     void open_gamepad(SDL_JoystickID id);
     void close_gamepad(SDL_JoystickID id);
     void sample_pad();
@@ -859,6 +862,21 @@ void VulkanRenderer::Impl::flush() {
 
 void VulkanRenderer::Impl::finish_frame(bool show_game) {
     end_pass();
+    // The window follows the page's area for it (#screen in web/shell.html),
+    // which changes with the browser window and the log below it.
+    double area_width = 0.0, area_height = 0.0;
+    if (emscripten_get_element_css_size(kScreenSelector, &area_width, &area_height) == EMSCRIPTEN_RESULT_SUCCESS &&
+        area_width >= 1.0 && area_height >= 1.0) {
+        int window_width = 0, window_height = 0;
+        SDL_GetWindowSize(window, &window_width, &window_height);
+        const int want_width = static_cast<int>(area_width), want_height = static_cast<int>(area_height);
+        if (want_width != window_width || want_height != window_height)
+            SDL_SetWindowSize(window, want_width, want_height);
+    }
+    int pixel_width = 0, pixel_height = 0;
+    SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
+    if (static_cast<std::uint32_t>(pixel_width) != width || static_cast<std::uint32_t>(pixel_height) != height)
+        configured = false;
     if (!configured) configure_surface();
     if (!configured) {
         flush();
@@ -1162,7 +1180,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) std::cout << "[pad] no gamepad support: " << SDL_GetError() << "\n";
     const std::uint32_t scale = std::clamp<std::uint32_t>(settings::current().window_scale, 1u, settings::kMaxWindowScale);
     impl.window = SDL_CreateWindow(config.title.c_str(), static_cast<int>(kPspWidth * scale),
-                                   static_cast<int>(kPspHeight * scale), SDL_WINDOW_RESIZABLE);
+                                   static_cast<int>(kPspHeight * scale),
+                                   SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (impl.window == nullptr) {
         error = std::string("SDL_CreateWindow failed: ") + SDL_GetError();
         return false;
@@ -1233,6 +1252,7 @@ void VulkanRenderer::Impl::sample_pad() {
     typed = keys_resolver.update(
         input::Table{player.controls.keys, player.controls.combos, false},
         [&](input::Binding binding) {
+            if (const int button = input::mouse_button_of(binding)) return (mouse_buttons & (1u << button)) != 0u;
             const int position = input::key_position(binding);
             return position >= 0 && position < SDL_SCANCODE_COUNT && keys[position];
         },
@@ -1286,6 +1306,13 @@ bool VulkanRenderer::pump_events() {
         if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) impl_->configured = false;
         if (event.type == SDL_EVENT_GAMEPAD_ADDED) impl_->open_gamepad(event.gdevice.which);
         if (event.type == SDL_EVENT_GAMEPAD_REMOVED) impl_->close_gamepad(event.gdevice.which);
+        // Mouse buttons press what the bindings put on them (the attacks by
+        // default) while the game has the input. Releases always count.
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button < 32u)
+            impl_->mouse_buttons &= ~(1u << event.button.button);
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button < 32u && impl_->game_input &&
+            event.button.which != SDL_TOUCH_MOUSEID)
+            impl_->mouse_buttons |= 1u << event.button.button;
         if (impl_->event_hook && impl_->event_hook(event)) continue;
     }
     impl_->sample_pad();
