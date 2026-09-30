@@ -216,7 +216,10 @@ void load_overlay_libraries() {
     std::error_code ec;
     std::filesystem::directory_iterator entries(directory, ec);
     if (ec) {
-        std::cerr << "[overlay] no overlay libraries in " << path_to_utf8(directory) << "\n";
+        if (!overlay_corpora().empty())
+            std::cout << "Overlay corpora: " << overlay_corpora().size() << " linked into the program\n";
+        else
+            std::cerr << "[overlay] no overlay libraries in " << path_to_utf8(directory) << "\n";
         return;
     }
     std::vector<std::filesystem::path> paths;
@@ -349,6 +352,10 @@ void revalidate_overlays(Runtime &runtime) {
 }
 
 void forget_unmatched_overlays() { unmatched_slots().clear(); }
+
+void register_linked_overlay(const OverlayModuleInfo &info, void (*install)(psprecomp::Runtime &runtime)) {
+    overlay_corpora().push_back(OverlayCorpus{info.name, info.base, info.size, info.code_size, info.hash, install});
+}
 
 void install_overlay_support(Runtime &runtime) {
     (void)runtime;

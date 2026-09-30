@@ -876,6 +876,26 @@ function(mhp3rd_add_overlay meta_path)
         message(WARNING "mhp3rd: no sources for overlay ${MHP3RD_OVERLAY_PREFIX}")
         return()
     endif()
+
+    if(EMSCRIPTEN)
+        # The web port loads no libraries: the overlays MHP3RD_WEB_OVERLAYS
+        # names are linked into the program and register themselves; the rest
+        # run interpreted.
+        if(NOT MHP3RD_OVERLAY_NAME MATCHES "${MHP3RD_WEB_OVERLAYS}")
+            return()
+        endif()
+        set(entry_point "${CMAKE_CURRENT_BINARY_DIR}/overlays/${MHP3RD_OVERLAY_PREFIX}_linked.cpp")
+        configure_file("${MHP3RD_PROFILE_DIR}/host/overlay_module_linked.cpp.in" "${entry_point}" @ONLY)
+        set(target "overlay_${MHP3RD_OVERLAY_PREFIX}")
+        add_library(${target} OBJECT ${sources} "${entry_point}")
+        target_include_directories(${target} PRIVATE
+            "${source_dir}" "${MHP3RD_PROFILE_DIR}/host" "${PROJECT_SOURCE_DIR}/include")
+        target_compile_options(${target} PRIVATE -O${PSPRECOMP_GENERATED_OPT_LEVEL} -g0)
+        set_target_properties(${target} PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
+        target_sources(Yakumo PRIVATE $<TARGET_OBJECTS:${target}>)
+        set_property(GLOBAL APPEND PROPERTY MHP3RD_LINKED_OVERLAYS "${MHP3RD_OVERLAY_NAME}")
+        return()
+    endif()
     set(entry_point "${CMAKE_CURRENT_BINARY_DIR}/overlays/${MHP3RD_OVERLAY_PREFIX}_module.cpp")
     configure_file("${MHP3RD_PROFILE_DIR}/host/overlay_module.cpp.in" "${entry_point}" @ONLY)
 
@@ -927,9 +947,23 @@ function(mhp3rd_add_overlay meta_path)
     endif()
 endfunction()
 
+# The overlays the web build links in, by name (a regular expression). All 355
+# come to about 1.1 GB of C++, mostly the monsters' (em*) and the weapons'
+# (we*), too much for one program a page loads; the default takes the
+# cutscenes (demo_*), the map parts (P_*) and the small screens.
+set(MHP3RD_WEB_OVERLAYS
+    "^(demo_sub|demo_task|movie_task|cont_task|option_task|install_task|tutorialm|result|edit_task|gallery_task|P_.*)$"
+    CACHE STRING "Overlays linked into the web build (a regular expression over their names)")
+
 file(GLOB MHP3RD_OVERLAY_METADATA CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/overlays/*/meta.txt")
 foreach(meta IN LISTS MHP3RD_OVERLAY_METADATA)
     mhp3rd_add_overlay("${meta}")
 endforeach()
-list(LENGTH MHP3RD_OVERLAY_METADATA MHP3RD_OVERLAY_COUNT)
-message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay librar(ies) in ${MHP3RD_OVERLAY_DIR}")
+if(EMSCRIPTEN)
+    get_property(MHP3RD_LINKED_OVERLAYS GLOBAL PROPERTY MHP3RD_LINKED_OVERLAYS)
+    list(LENGTH MHP3RD_LINKED_OVERLAYS MHP3RD_OVERLAY_COUNT)
+    message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay corpora linked into the web build")
+else()
+    list(LENGTH MHP3RD_OVERLAY_METADATA MHP3RD_OVERLAY_COUNT)
+    message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay librar(ies) in ${MHP3RD_OVERLAY_DIR}")
+endif()

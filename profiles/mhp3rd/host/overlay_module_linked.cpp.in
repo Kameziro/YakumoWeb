@@ -1,0 +1,23 @@
+// Entry point of one overlay corpus linked into the program (the web port,
+// which loads no libraries), configured from the overlay's meta.txt by
+// profiles/mhp3rd/CMakeLists.txt. It registers the corpus while the program
+// starts; the host then installs it as it does a loaded library's.
+#include "overlay_module.hpp"
+
+#include "psprecomp/runtime.hpp"
+
+namespace psprecomp {
+void register_@MHP3RD_OVERLAY_PREFIX@_functions(Runtime &runtime);
+}
+
+namespace {
+
+constexpr mhp3rd::OverlayModuleInfo kInfo{mhp3rd::kOverlayAbiVersion, @MHP3RD_OVERLAY_BASE@u,
+                                          @MHP3RD_OVERLAY_SIZE@u, @MHP3RD_OVERLAY_CODE_SIZE@u,
+                                          @MHP3RD_OVERLAY_HASH@ull, "@MHP3RD_OVERLAY_NAME@"};
+
+void install(psprecomp::Runtime &runtime) { psprecomp::register_@MHP3RD_OVERLAY_PREFIX@_functions(runtime); }
+
+[[maybe_unused]] const bool registered = (mhp3rd::register_linked_overlay(kInfo, &install), true);
+
+} // namespace

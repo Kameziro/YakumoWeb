@@ -54,3 +54,10 @@ extern "C" {
 MHP3RD_OVERLAY_EXPORT const mhp3rd::OverlayModuleInfo *mhp3rd_overlay_info();
 MHP3RD_OVERLAY_EXPORT void mhp3rd_register_overlay(psprecomp::Runtime &runtime);
 }
+
+namespace mhp3rd {
+// An overlay corpus linked into the program instead of loaded as a library
+// (the web port, which loads no libraries): its entry point calls this while
+// the program starts (host/overlay_module_linked.cpp.in).
+void register_linked_overlay(const OverlayModuleInfo &info, void (*install)(psprecomp::Runtime &runtime));
+} // namespace mhp3rd
