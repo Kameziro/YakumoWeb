@@ -1,4 +1,5 @@
-// Runs before main(): keeps the per-user data directory in the browser.
+// Runs before main(): keeps the per-user data directory in the browser, and
+// brings in what the page serves beside the program.
 //
 // SDL_GetPrefPath returns /libsdl/<organization>/<application>/ under
 // Emscripten, so settings, saves and EBOOT.ELF all live below /libsdl. That
@@ -8,12 +9,44 @@
 // half written.
 Module.preRun = Module.preRun || [];
 
+const kDataDirectory = "/libsdl/Yakumo/MHP3rd";
+
+// Loads `url` into the file system at `path` before main() starts. A missing
+// file is left out, with a note unless `optional`.
+function preload(url, path, optional) {
+  const id = "yakumo-preload-" + path;
+  addRunDependency(id);
+  fetch(url)
+    .then((response) => {
+      if (!response.ok) throw new Error(response.status + " " + response.statusText);
+      return response.arrayBuffer();
+    })
+    .then((bytes) => {
+      FS.mkdirTree(path.slice(0, path.lastIndexOf("/")));
+      FS.writeFile(path, new Uint8Array(bytes));
+      console.log("[preload] " + url + ": " + bytes.byteLength + " bytes");
+    })
+    .catch((error) => {
+      if (!optional) console.error("[preload] cannot load " + url + ": " + error);
+    })
+    .finally(() => removeRunDependency(id));
+}
+
+// The game's text needs a font with Japanese in it, and a page has no system
+// fonts to find. fonts/NotoSansCJK-Regular.ttc beside the page (Noto Sans CJK,
+// SIL Open Font License) goes where host/fonts/game_font.cpp looks on Linux.
+Module.preRun.push(() => {
+  preload("fonts/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", true);
+});
+
 // Development loader, until the game data is loaded in chunks:
 //   Yakumo.html?game=<folder URL>   downloads <folder>/EBOOT.ELF and
 //                                   <folder>/disc.iso into /game and points
 //                                   MHP3RD_GAME_DIR there
 //   Yakumo.html?env=A=1,B=2         sets environment variables
-// The whole image is held in memory, about 1.3 GB.
+// The whole image is held in memory, about 1.3 GB. The memory stick of that
+// game folder (/game/ms0, the saves) is the one in the data directory, so it
+// is kept.
 Module.preRun.push(() => {
   const params = new URLSearchParams(location.search);
   for (const pair of (params.get("env") || "").split(",")) {
@@ -24,22 +57,9 @@ Module.preRun.push(() => {
   if (!game) return;
   const base = game.endsWith("/") ? game : game + "/";
   FS.mkdir("/game");
+  FS.symlink(kDataDirectory + "/ms0", "/game/ms0");
   ENV.MHP3RD_GAME_DIR = "/game";
-  for (const name of ["EBOOT.ELF", "disc.iso"]) {
-    const id = "yakumo-game-" + name;
-    addRunDependency(id);
-    fetch(base + name)
-      .then((response) => {
-        if (!response.ok) throw new Error(response.status + " " + response.statusText);
-        return response.arrayBuffer();
-      })
-      .then((bytes) => {
-        FS.writeFile("/game/" + name, new Uint8Array(bytes));
-        console.log("[game] " + name + ": " + bytes.byteLength + " bytes");
-      })
-      .catch((error) => console.error("[game] cannot load " + base + name + ": " + error))
-      .finally(() => removeRunDependency(id));
-  }
+  for (const name of ["EBOOT.ELF", "disc.iso"]) preload(base + name, "/game/" + name, false);
 });
 
 Module.preRun.push(() => {
@@ -48,6 +68,7 @@ Module.preRun.push(() => {
   addRunDependency("yakumo-data");
   FS.syncfs(true, (error) => {
     if (error) console.error("[data] cannot read the saved data:", error);
+    FS.mkdirTree(kDataDirectory + "/ms0");
     removeRunDependency("yakumo-data");
   });
 });

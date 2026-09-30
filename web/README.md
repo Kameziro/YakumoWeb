@@ -54,7 +54,9 @@ Until the game data is loaded in chunks, a development loader in `web/pre.js` do
 http://127.0.0.1:8765/Yakumo.html?game=game&env=MHP3RD_NO_AUDIO=1,MHP3RD_PERF=log
 ```
 
-`env=` sets environment variables, comma-separated. The game runs, but its picture is not drawn yet.
+`env=` sets environment variables, comma-separated. The saves of that game folder (`/game/ms0`) are the data directory's, so they persist.
+
+The game's text needs a font with Japanese in it, and a page has no system fonts. Put Noto Sans CJK (SIL Open Font License) at `build/web/fonts/NotoSansCJK-Regular.ttc`, for example from Debian's `fonts-noto-cjk` package, and the page loads it where the game looks on Linux. Without it the game's text is blank.
 
 How the port fits in:
 
