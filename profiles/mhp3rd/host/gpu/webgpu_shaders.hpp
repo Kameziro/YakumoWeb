@@ -24,7 +24,7 @@ struct Draw {
     uv_transform: vec4f,    // xy: scale, zw: offset
     view_z: vec4f,          // row of view * world that gives view-space z
     fold: vec4f,            // xy: scale, zw: offset, from the GE viewport to the whole target
-    extra: vec4f,           // x: 1 mirrors depth
+    extra: vec4f,           // x: 1 mirrors depth, y: 1 reads the texture's alpha as 1 (a 5650 render target)
     ambient: vec4f,
     fog: vec4f,             // x: end, y: scale
     fog_color: vec4f,
@@ -162,7 +162,8 @@ fn light_vertex(v: VertexIn) -> Lit {
 }
 
 @fragment fn fragment_main(f: VertexOut) -> @location(0) vec4f {
-    let texel = textureSample(guest_texture, guest_sampler, clamp(f.texcoord, f.uv_rect.xy, f.uv_rect.zw));
+    var texel = textureSample(guest_texture, guest_sampler, clamp(f.texcoord, f.uv_rect.xy, f.uv_rect.zw));
+    if (draw.extra.y > 0.5) { texel.a = 1.0; }
     var color = f.color;
     if (draw.texture_params.x > 0.5) {
         let function = i32(draw.texture_params.y + 0.5);

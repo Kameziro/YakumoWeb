@@ -13,12 +13,12 @@
 //
 // The keyboard and the first gamepad reach the game through the player's
 // bindings, as in the Vulkan renderer, and mouse buttons. A frame the game
-// uploads itself (a movie) is shown in place of its target. Not implemented
-// yet: touch and mouse motion for the game, the lead-in of L, more than one
-// gamepad; points and lines; render targets sampled as textures, write back
-// to guest memory; capture; frame interpolation; texture packs and the
-// sharper interface textures. Those members keep neutral values and do
-// nothing.
+// uploads itself (a movie) is shown in place of its target, and a texture in
+// a render target is sampled from a copy of that target. Not implemented yet:
+// touch and mouse motion for the game, the lead-in of L, more than one
+// gamepad; write back to guest memory; capture; frame interpolation; texture
+// packs and the sharper interface textures. Those members keep neutral values
+// and do nothing. Points and lines are not drawn, as in the Vulkan renderer.
 
 #include "gpu/vulkan_renderer.hpp"
 
@@ -405,7 +405,30 @@ struct VulkanRenderer::Impl {
         WGPUTextureView depth_view{};
         WGPUBindGroup sample_group{};  // for showing it
         bool cleared{};                // the first pass into it clears it
+        // As the Vulkan renderer's Target: the guest framebuffer's layout, and
+        // guest memory under it (a word every 256 bytes) when it was drawn, so
+        // that a texture the game reads from there is known to be this target.
+        std::uint32_t stride{};
+        std::uint32_t format{};
+        std::vector<std::uint32_t> guest_words;
+        std::uint64_t last_drawn_frame{~0ull};
+        std::uint64_t draw_serial{};
+        // A sampled copy, for drawing it as a texture: a target cannot be read
+        // in the pass that draws into it.
+        WGPUTexture copy{};
+        WGPUTextureView copy_view{};
+        WGPUBindGroup copy_group{};
+        std::uint64_t copied_serial{~0ull};
     };
+    std::uint64_t target_draw_counter{};
+    struct FramebufferTexture {
+        Target *target{};
+        std::uint32_t x{};
+        std::uint32_t y{};
+    };
+    FramebufferTexture find_framebuffer_texture(const GuestMemory &memory, const TextureState &texture);
+    WGPUBindGroup framebuffer_group(Target &target);
+    void snapshot_guest_words(const GuestMemory &memory, std::uint32_t address, Target &target);
     struct Texture {
         WGPUTexture texture{};
         WGPUTextureView view{};
@@ -760,7 +783,8 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     if (const auto found = targets.find(address); found != targets.end()) return &found->second;
     Target target;
     WGPUTextureDescriptor color_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
-    color_desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+    color_desc.usage =
+        WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc;
     color_desc.size = {target_width, target_height, 1u};
     color_desc.format = kTargetFormat;
     target.color = wgpuDeviceCreateTexture(device, &color_desc);
@@ -781,6 +805,100 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     group_desc.entries = entries.data();
     target.sample_group = wgpuDeviceCreateBindGroup(device, &group_desc);
     return &targets.emplace(address, target).first->second;
+}
+
+namespace {
+std::uint32_t framebuffer_bytes_per_pixel(std::uint32_t format) { return format == 3u ? 4u : 2u; }
+std::uint32_t direct_texture_bytes_per_pixel(TextureFormat format) {
+    return format == TextureFormat::Rgba8888 ? 4u : 2u;
+}
+} // namespace
+
+void VulkanRenderer::Impl::snapshot_guest_words(const GuestMemory &memory, std::uint32_t address, Target &target) {
+    const std::uint32_t bytes = target.stride * kPspHeight * framebuffer_bytes_per_pixel(target.format);
+    target.guest_words.clear();
+    if (!memory.contains(address, bytes)) return;
+    target.guest_words.reserve(bytes / 256u + 1u);
+    for (std::uint32_t offset = 0; offset + 4u <= bytes; offset += 256u)
+        target.guest_words.push_back(memory.load32(address + offset));
+}
+
+// The render target a texture lies in, if the texture reads it the way it was
+// drawn: the same row length, a direct colour format of the same pixel size,
+// and guest memory under the texture unchanged since the target was last
+// drawn to. As find_framebuffer_texture() in vulkan_renderer.cpp.
+VulkanRenderer::Impl::FramebufferTexture VulkanRenderer::Impl::find_framebuffer_texture(const GuestMemory &memory,
+                                                                                         const TextureState &texture) {
+    if (texture.swizzled || static_cast<std::uint32_t>(texture.format) > 3u || texture.width == 0u ||
+        texture.height == 0u)
+        return {};
+    const std::uint32_t texture_address = GuestMemory::canonical(texture.address);
+    Target *best = nullptr;
+    std::uint32_t best_base = 0u;
+    for (auto &[address, target] : targets) {
+        if (target.guest_words.empty()) continue;
+        const std::uint32_t bytes_per_pixel = framebuffer_bytes_per_pixel(target.format);
+        if (direct_texture_bytes_per_pixel(texture.format) != bytes_per_pixel) continue;
+        const std::uint32_t base = GuestMemory::canonical(address);
+        const std::uint32_t bytes = target.stride * kPspHeight * bytes_per_pixel;
+        if (texture_address < base || texture_address - base >= bytes) continue;
+        if (texture.buffer_width != target.stride || (texture_address - base) % bytes_per_pixel != 0u) continue;
+        if (best == nullptr || target.draw_serial > best->draw_serial) {
+            best = &target;
+            best_base = base;
+        }
+    }
+    if (best == nullptr) return {};
+    const std::uint32_t bytes_per_pixel = framebuffer_bytes_per_pixel(best->format);
+    const std::uint64_t texture_end = static_cast<std::uint64_t>(texture_address) +
+                                      static_cast<std::uint64_t>(texture.buffer_width) * texture.height * bytes_per_pixel;
+    for (std::size_t i = 0; i < best->guest_words.size(); ++i) {
+        const std::uint32_t word_address = best_base + static_cast<std::uint32_t>(i) * 256u;
+        if (word_address < texture_address || word_address >= texture_end) continue;
+        if (!memory.contains(word_address, 4u) || memory.load32(word_address) != best->guest_words[i]) return {};
+    }
+    const std::uint32_t pixel = (texture_address - best_base) / bytes_per_pixel;
+    FramebufferTexture found{best, pixel % best->stride, pixel / best->stride};
+    if (found.x >= kPspWidth || found.y >= kPspHeight) return {};
+    return found;
+}
+
+// The target's sampled copy, brought up to date with its latest draw. The copy
+// goes between passes, so the pass in progress ends here when it needs one.
+WGPUBindGroup VulkanRenderer::Impl::framebuffer_group(Target &target) {
+    if (target.copy == nullptr) {
+        WGPUTextureDescriptor desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
+        desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+        desc.size = {target_width, target_height, 1u};
+        desc.format = kTargetFormat;
+        target.copy = wgpuDeviceCreateTexture(device, &desc);
+        target.copy_view = wgpuTextureCreateView(target.copy, nullptr);
+        std::array<WGPUBindGroupEntry, 2> entries{WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+        entries[0].binding = 0;
+        entries[0].textureView = target.copy_view;
+        entries[1].binding = 1;
+        entries[1].sampler = sampler;
+        WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        group_desc.layout = texture_layout;
+        group_desc.entryCount = entries.size();
+        group_desc.entries = entries.data();
+        target.copy_group = wgpuDeviceCreateBindGroup(device, &group_desc);
+    }
+    if (target.copied_serial != target.draw_serial) {
+        const std::uint32_t resume = pass_target;
+        const bool had_pass = pass != nullptr;
+        end_pass();
+        begin_recording();
+        WGPUTexelCopyTextureInfo source = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+        source.texture = target.color;
+        WGPUTexelCopyTextureInfo destination = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+        destination.texture = target.copy;
+        const WGPUExtent3D size{target_width, target_height, 1u};
+        wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &destination, &size);
+        target.copied_serial = target.draw_serial;
+        if (had_pass) begin_pass(resume);
+    }
+    return target.copy_group;
 }
 
 VulkanRenderer::Impl::Texture VulkanRenderer::Impl::make_texture(std::uint32_t width, std::uint32_t height,
@@ -1202,10 +1320,40 @@ void VulkanRenderer::Impl::draw(const DrawCall &call, const GuestMemory &memory)
     if (right == left || bottom == top) return;
 
     WGPUBindGroup texture = white.group;
-    if (call.texture.enabled && !call.clear_mode) texture = texture_group(memory, call.texture);
+    if (call.texture.enabled && !call.clear_mode) {
+        // A texture the game drew itself (shadows, reflections, screen
+        // effects) is sampled from its render target, where the picture is;
+        // guest memory never had it. The coordinates map into the target's
+        // 480x272 as the Vulkan renderer maps them.
+        const FramebufferTexture source = find_framebuffer_texture(memory, call.texture);
+        if (source.target != nullptr) {
+            texture = framebuffer_group(*source.target);
+            const float width = static_cast<float>(call.texture.width);
+            const float height = static_cast<float>(call.texture.height);
+            const std::array<float, 4> uv = block.uv_transform;
+            block.uv_transform = {uv[0] * width / kPspWidth, uv[1] * height / kPspHeight,
+                                  (uv[2] * width + static_cast<float>(source.x)) / kPspWidth,
+                                  (uv[3] * height + static_cast<float>(source.y)) / kPspHeight};
+            // A 5650 texture has no alpha: the GE reads it as opaque.
+            if (call.texture.format == TextureFormat::Rgba5650) block.extra[1] = 1.0f;
+        } else {
+            texture = texture_group(memory, call.texture);
+        }
+    }
 
     if (pass == nullptr || pass_target != call.target.color_address) begin_pass(call.target.color_address);
     if (movie_valid && movie_address == call.target.color_address) movie_valid = false;
+    {
+        Target &drawn = targets.at(call.target.color_address);
+        const bool layout_changed =
+            drawn.stride != call.target.color_stride || drawn.format != call.target.color_format;
+        drawn.stride = call.target.color_stride;
+        drawn.format = call.target.color_format;
+        if (layout_changed || drawn.guest_words.empty() || drawn.last_drawn_frame != frames)
+            snapshot_guest_words(memory, call.target.color_address, drawn);
+        drawn.last_drawn_frame = frames;
+        drawn.draw_serial = ++target_draw_counter;
+    }
 
     const std::uint64_t vertex_offset = vertex_bytes.size();
     vertex_bytes.resize(vertex_offset + vertex_size);
