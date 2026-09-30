@@ -355,16 +355,21 @@ if(EMSCRIPTEN)
     # JSPI suspends the wasm stack while the browser takes its turn, so the
     # port's blocking loops (the setup screens, the game's frames) keep their
     # shape. The recompiled code nests deeply: the same 64 MiB stack as on
-    # Linux. The page comes from web/shell.html.
+    # Linux. The page comes from web/shell.html; web/pre.js keeps the data
+    # directory in IndexedDB.
     target_link_options(Yakumo PRIVATE
         -sJSPI
         -sSTACK_SIZE=64MB
         -sINITIAL_MEMORY=256MB
         -sALLOW_MEMORY_GROWTH=1
         -sEXIT_RUNTIME=1
+        -sEXPORTED_RUNTIME_METHODS=FS
+        -lidbfs.js
+        --pre-js "${PROJECT_SOURCE_DIR}/web/pre.js"
         --shell-file "${PROJECT_SOURCE_DIR}/web/shell.html")
     set_target_properties(Yakumo PROPERTIES SUFFIX ".html")
-    set_property(TARGET Yakumo APPEND PROPERTY LINK_DEPENDS "${PROJECT_SOURCE_DIR}/web/shell.html")
+    set_property(TARGET Yakumo APPEND PROPERTY LINK_DEPENDS
+        "${PROJECT_SOURCE_DIR}/web/shell.html" "${PROJECT_SOURCE_DIR}/web/pre.js")
 endif()
 # The host only: the generated code never sees FFmpeg.
 mhp3rd_use_ffmpeg(Yakumo)
