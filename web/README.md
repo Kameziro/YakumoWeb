@@ -99,6 +99,8 @@ The gateway listens on `127.0.0.1:27380` and connects only to `ADHOC_SERVER` and
 
 In the game, Network > Server empty means this site's `/adhoc`; it also takes another path on the site, or a `ws://` or `wss://` address (`ws://127.0.0.1:27380/adhoc` with `serve.py`). The page cannot host a session or find one on the local network, so those parts of the Network page are left out.
 
+Checked at `bdc5f3e`: two players, each in a browser, met in a hall on a deployed site (Nginx, gateway, `Yakumo --adhoc-server` in Docker) and played three quests together.
+
 In the page, the ad hoc client's network thread owns the WebSockets: they live in its worker, and instead of waiting in `poll()` it runs one pass of its loop every few milliseconds from a timer, so the worker's event loop can deliver their events. Two tabs of one site share the data directory, and with it the player's address and name: a second player on one computer needs another browser profile.
 
 ## Milestones
@@ -112,3 +114,4 @@ In the page, the ad hoc client's network thread owns the WebSockets: they live i
 | M4 | WebGPU renderer; menus visible | Done: the game draws, in town and on a quest; keyboard, mouse buttons and a gamepad reach it; text uses Noto Sans CJK; saves persist. Missing: render targets as textures, points and lines, movies, pointer capture |
 | M5 | Deployed behind authentication | Done: Nginx with a password, HTTPS and the isolation headers (`web/nginx.conf.example`); the files go up with `tar` over SSH |
 | M6+ | FFmpeg, compiled overlays, threads, CI | FFmpeg: built for the web and linked statically (LGPL-2.1-or-later; the build is reproducible from this tree, so it can be relinked); music and movies play. Audio: an AudioWorklet on the browser's audio thread. Threads: done in M3. Overlays: 183 of 355 linked (`MHP3RD_WEB_OVERLAYS`); the rest, mostly monsters and weapons, run interpreted. The village, its cutscenes and a quest run at 30 fps and 100% speed in Chrome on an Intel laptop GPU. Next: render targets as textures, points and lines, mouse camera, CI |
+| M7 | Ad hoc play | Done: through the WebSocket gateway in `web/adhoc-gateway`; two browser players played three quests together. Not tried: cross-play with a desktop player |
