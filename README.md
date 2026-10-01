@@ -8,6 +8,22 @@ A native port of **Monster Hunter Portable 3rd HD Ver.** made by static recompil
 
 > **This project does not include any game assets.** You must provide the files from your own legally obtained copy of Monster Hunter Portable 3rd HD Ver. (`NPJB-40001`) to install or build Yakumo.
 
+## YakumoWeb: Yakumo in the browser
+
+This fork adds a build of Yakumo that runs in a web browser. It is the same port, with the same recompiled game code, compiled to WebAssembly with Emscripten instead of to a native executable:
+
+- **Graphics:** a WebGPU renderer takes the place of the Vulkan one, behind the same interface, so the kernel, the HLE modules and the menus are unchanged.
+- **The game's loops:** WebAssembly JSPI suspends the program while the browser draws each frame, so the game's blocking loops keep their shape.
+- **Sound:** music, effects and movies go through FFmpeg built for the web and an AudioWorklet on the browser's own audio thread.
+- **Your data:** saves and settings stay in the browser (IndexedDB); the disc image is downloaded once and kept in the browser's private storage.
+- **Code:** the recompiled cutscenes, map parts and small screens are linked in; the other overlays run interpreted.
+
+**Status: playable** in current Chrome and Edge. The village, its cutscenes and quests run at 30 fps and full speed, with sound, music, movies, the keyboard, the mouse and saves. A gamepad, Firefox and Safari are untested. See [web/README.md](web/README.md) for how it works, how to build it, what is still missing, and the milestones.
+
+**For yourself only.** The web build is made from your own disc image, exactly like the native one, so what it serves is derived from your copy of the game. Serve it only to yourself, behind a password (see [web/nginx.conf.example](web/nginx.conf.example)). Never publish it.
+
+The work lives on the `web` branch, which follows this project's `main` through merges.
+
 ## Legal disclaimer
 
 **Yakumo** is an independent, open-source project and is not affiliated with, authorized by, sponsored by, or endorsed by CAPCOM, Sony, or any of their affiliates.

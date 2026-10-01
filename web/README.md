@@ -1,6 +1,12 @@
-# Web port (work in progress)
+# Web port
 
-This branch builds Yakumo for the browser with Emscripten and WebGPU. Nothing web-specific works yet; the milestones below track progress.
+This branch builds Yakumo for the browser with Emscripten and WebGPU. The game is playable in current Chrome and Edge: the village, its cutscenes and quests run at 30 fps and full speed, with sound, music, movies, the keyboard, the mouse and saves. The milestones at the end record what was done and what is missing.
+
+The steps, in order:
+
+1. Build the container ([Build environment](#build-environment)).
+2. Prepare the game and generate its code natively in it ([Native stages](#native-stages-in-the-container)), then its overlays (`web/generate_overlays.sh`).
+3. Build for the web ([Web build](#web-build-in-the-container)) and serve the page with `web/serve.py`, or from your own server behind a password (`web/nginx.conf.example`).
 
 The web build still needs your own disc image. The native build steps in [docs/BUILDING.md](../docs/BUILDING.md) prepare the executable and generate the recompiled code, and the web build compiles that code to WebAssembly. Everything derived from the game stays out of Git, as in the native build.
 
@@ -26,7 +32,10 @@ cmake --build out/linux --target Yakumo
 out/linux/bin/Yakumo --install /iso/game.iso --in-place
 profiles/mhp3rd/scripts/prepare_game.sh /iso/game.iso ~/.local/share/Yakumo/MHP3rd/EBOOT.ELF
 profiles/mhp3rd/scripts/generate.sh out/linux
+web/generate_overlays.sh out/linux
 ```
+
+`generate_overlays.sh` recompiles the 355 overlays to C++ (about 1.1 GB, in under a minute) without building the native libraries. The web build links the ones `MHP3RD_WEB_OVERLAYS` names: by default the cutscenes, the map parts and the small screens, 183 of them. The rest, mostly the monsters' and the weapons', would make the program too large for a page and run interpreted.
 
 ## Web build in the container
 
