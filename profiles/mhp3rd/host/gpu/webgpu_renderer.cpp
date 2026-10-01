@@ -499,6 +499,8 @@ struct VulkanRenderer::Impl {
 
     bool request_device(std::string &error);
     void configure_surface();
+    // Sizes the window to the page's area for it (#screen in web/shell.html).
+    void follow_screen_area();
     bool create_ge_resources(std::string &error);
     WGPURenderPipeline pipeline_for(const PipelineKey &key);
     Target *target_for(std::uint32_t address);
@@ -1045,10 +1047,9 @@ void VulkanRenderer::Impl::flush() {
     uniform_written = false;
 }
 
-void VulkanRenderer::Impl::finish_frame(bool show_game) {
-    end_pass();
-    // The window follows the page's area for it (#screen in web/shell.html),
-    // which changes with the browser window and the log below it.
+// The window follows the page's area for it, which changes with the browser
+// window and the log below it.
+void VulkanRenderer::Impl::follow_screen_area() {
     double area_width = 0.0, area_height = 0.0;
     if (emscripten_get_element_css_size(kScreenSelector, &area_width, &area_height) == EMSCRIPTEN_RESULT_SUCCESS &&
         area_width >= 1.0 && area_height >= 1.0) {
@@ -1058,6 +1059,11 @@ void VulkanRenderer::Impl::finish_frame(bool show_game) {
         if (want_width != window_width || want_height != window_height)
             SDL_SetWindowSize(window, want_width, want_height);
     }
+}
+
+void VulkanRenderer::Impl::finish_frame(bool show_game) {
+    end_pass();
+    follow_screen_area();
     int pixel_width = 0, pixel_height = 0;
     SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
     if (static_cast<std::uint32_t>(pixel_width) != width || static_cast<std::uint32_t>(pixel_height) != height)
@@ -1102,7 +1108,29 @@ void VulkanRenderer::Impl::finish_frame(bool show_game) {
         wgpuRenderPassEncoderSetViewport(canvas_pass, 0.0f, 0.0f, static_cast<float>(width),
                                          static_cast<float>(height), 0.0f, 1.0f);
     }
-    if (ui_ready && ui_draw_data != nullptr) ImGui_ImplWGPU_RenderDrawData(ui_draw_data, canvas_pass);
+    if (ui_ready && ui_draw_data != nullptr) {
+        // The interface was laid out for the window's size when its frame
+        // began. The canvas can have changed since (the page resized while
+        // the game ran), and a scissor or viewport beyond the canvas
+        // invalidates the whole frame. The projection maps one interface
+        // unit to the same pixels whatever the display size, so shrinking
+        // the display size to the canvas only crops.
+        static const bool trace_ui_size = std::getenv("MHP3RD_TRACE_UI_SIZE") != nullptr;
+        ImDrawData &ui = *ui_draw_data;
+        const float scale_x = ui.FramebufferScale.x > 0.0f ? ui.FramebufferScale.x : 1.0f;
+        const float scale_y = ui.FramebufferScale.y > 0.0f ? ui.FramebufferScale.y : 1.0f;
+        const float fit_width = static_cast<float>(width) / scale_x;
+        const float fit_height = static_cast<float>(height) / scale_y;
+        if (ui.DisplaySize.x > fit_width || ui.DisplaySize.y > fit_height) {
+            if (trace_ui_size)
+                std::cout << "[webgpu] interface laid out for " << ui.DisplaySize.x * scale_x << "x"
+                          << ui.DisplaySize.y * scale_y << " px on a " << width << "x" << height
+                          << " canvas; cropped\n";
+            ui.DisplaySize.x = std::min(ui.DisplaySize.x, fit_width);
+            ui.DisplaySize.y = std::min(ui.DisplaySize.y, fit_height);
+        }
+        ImGui_ImplWGPU_RenderDrawData(&ui, canvas_pass);
+    }
     wgpuRenderPassEncoderEnd(canvas_pass);
     wgpuRenderPassEncoderRelease(canvas_pass);
     flush();
@@ -1756,7 +1784,13 @@ void VulkanRenderer::shutdown_ui() {
 }
 
 void VulkanRenderer::begin_ui_frame() {
-    if (impl_ && impl_->ui_ready) ImGui_ImplWGPU_NewFrame();
+    if (!impl_ || !impl_->ui_ready) return;
+    // Resize before ImGui reads the window's size for this frame, so the
+    // interface is laid out for the canvas it will be drawn on.
+    // MHP3RD_WEB_LATE_RESIZE=1 resizes only when the frame ends, as before.
+    static const bool late_resize = std::getenv("MHP3RD_WEB_LATE_RESIZE") != nullptr;
+    if (!late_resize) impl_->follow_screen_area();
+    ImGui_ImplWGPU_NewFrame();
 }
 
 void VulkanRenderer::set_ui_draw_data(ImDrawData *draw_data) {

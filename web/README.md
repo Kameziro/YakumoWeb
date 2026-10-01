@@ -71,6 +71,7 @@ How the port fits in:
 
 - `host/gpu/webgpu_renderer.cpp` implements `gpu::VulkanRenderer` with WebGPU. `vulkan_renderer.hpp` exposes no Vulkan types, so the kernel and the interface use it unchanged. So far it draws the interface only.
 - Each presented frame waits for the browser's next animation frame through JSPI, which suspends the wasm stack. The port's blocking loops keep their shape.
+- The canvas follows the page's `#screen` area, which changes with the browser window and the log. The window takes that size when an interface frame begins, so ImGui lays the frame out for the canvas it is drawn on. If the area changes later in the frame, the interface is cropped to the canvas, since a scissor rect beyond the canvas invalidates the whole frame. `MHP3RD_TRACE_UI_SIZE=1` logs each cropped frame; `MHP3RD_WEB_LATE_RESIZE=1` resizes only when the frame ends, as before, to compare.
 - `host/platform/web_dialogs.cpp` stands in for SDL's file dialogs, which Emscripten's SDL3 lacks.
 - The whole build uses WebAssembly exceptions (`-fwasm-exceptions`), since the port reports errors as C++ exceptions, and threads (`-pthread`), since the host starts `std::thread`s; eight workers start with the page.
 - The kernel's idle hook (`present_until`) gives the browser the time the kernel is about to sleep to keep PSP speed, since a sleep on the page's thread would spin.
