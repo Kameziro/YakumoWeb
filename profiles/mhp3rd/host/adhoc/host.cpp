@@ -17,6 +17,10 @@ namespace {
 // game's PSP release log in with the same one.
 constexpr const char *kProduct = "ULJM05800";
 constexpr std::size_t kRecentAddresses = 5u;
+#if defined(__EMSCRIPTEN__)
+// The gateway's path on the page's own site.
+constexpr const char *kWebGateway = "/adhoc";
+#endif
 
 struct HostState {
     std::mutex mutex;
@@ -48,11 +52,23 @@ std::string adhoc_server_address() {
         const std::uint16_t port = host().port;
         return port == adhoc::kAdhocctlPort ? std::string("127.0.0.1") : "127.0.0.1:" + std::to_string(port);
     }
+#if defined(__EMSCRIPTEN__)
+    // The web port reaches a server through a WebSocket gateway
+    // (web/adhoc-gateway), by default the one on the page's own site.
+    if (settings::current().adhoc_server.empty()) return kWebGateway;
+#endif
     return settings::current().adhoc_server;
 }
 
 bool adhoc_host_start() {
     HostState &state = host();
+#if defined(__EMSCRIPTEN__)
+    // A page can open connections but not accept them.
+    std::lock_guard lock(state.mutex);
+    state.error = "The browser cannot host a session. Host it from the desktop version or with Yakumo --adhoc-server, "
+                  "behind the site's gateway.";
+    return false;
+#else
     {
         std::lock_guard lock(state.mutex);
         if (state.server.running()) return true;
@@ -81,6 +97,7 @@ bool adhoc_host_start() {
     adhoc::Client::log("[adhoc] hosting a session", true);
     adhoc_apply_settings(true);
     return true;
+#endif
 }
 
 void adhoc_host_stop() {
@@ -114,8 +131,13 @@ void adhoc_shutdown() noexcept {
         state.port = 0u;
     } catch (...) {
     }
-    adhoc::Discovery::get().shutdown();
-    adhoc::Client::get().shutdown();
+    // Also where threads cannot be joined (the web port has none): a throw
+    // here would end the program before the caller reports why it stopped.
+    try {
+        adhoc::Discovery::get().shutdown();
+        adhoc::Client::get().shutdown();
+    } catch (...) {
+    }
 }
 
 void adhoc_join(const std::string &address) {

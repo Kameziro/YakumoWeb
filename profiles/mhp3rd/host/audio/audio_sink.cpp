@@ -17,6 +17,10 @@
 #if defined(MHP3RD_HAS_SDL_AUDIO)
 #include <SDL3/SDL.h>
 #endif
+#if defined(__EMSCRIPTEN__)
+#include <atomic>
+#include <emscripten/webaudio.h>
+#endif
 
 namespace mhp3rd::audio {
 namespace {
@@ -120,6 +124,13 @@ struct AudioSink::Impl {
 #if defined(MHP3RD_HAS_SDL_AUDIO)
     SDL_AudioStream *stream{};
 #endif
+#if defined(__EMSCRIPTEN__)
+    // The web port drains the ring from an AudioWorklet, on the browser's
+    // audio thread: SDL's output runs on the page's thread, which the game
+    // keeps busy, so it ran dry between frames and the sound stuttered.
+    std::atomic<bool> web_running{false};
+    std::atomic<bool> web_paused{false};
+#endif
 
     // Takes `count` frames off the front of the ring into `out` (which may be
     // null when nobody is listening), zeroing them so the next lap starts
@@ -190,6 +201,66 @@ void SDLCALL feed_device(void *user, SDL_AudioStream *stream, int additional, in
 }
 #endif
 
+#if defined(__EMSCRIPTEN__)
+constexpr const char *kWorkletName = "yakumo-audio";
+constexpr int kMaxQuantum = 4096;
+alignas(16) std::uint8_t worklet_stack[32768];
+
+// On the audio thread, once per render quantum (128 frames): the ring's next
+// frames, as planar float. The lock is only tried: a quantum that finds a
+// producer mixing plays silence rather than make the audio thread wait. The
+// mutex is a plain one, whose try and unlock need no pthread of their own.
+bool web_process(int, const AudioSampleFrame *, int output_count, AudioSampleFrame *outputs, int,
+                 const AudioParamFrame *, void *user) {
+    if (output_count < 1) return true;
+    auto *impl = static_cast<AudioSink::Impl *>(user);
+    AudioSampleFrame &out = outputs[0];
+    const int frames = std::min(out.samplesPerChannel, kMaxQuantum);
+    std::int16_t pcm[kMaxQuantum * kChannels];
+    bool filled = false;
+    if (!impl->web_paused.load(std::memory_order_relaxed) && impl->lock.try_lock()) {
+        impl->retire(static_cast<std::size_t>(frames), pcm, true);
+        impl->lock.unlock();
+        filled = true;
+    }
+    const float scale = impl->gain / 32768.0f;
+    for (int channel = 0; channel < out.numberOfChannels; ++channel) {
+        float *samples = out.data + channel * out.samplesPerChannel;
+        const int source = std::min(channel, static_cast<int>(kChannels) - 1);
+        for (int i = 0; i < frames; ++i)
+            samples[i] = filled ? static_cast<float>(pcm[i * kChannels + source]) * scale : 0.0f;
+    }
+    return true;
+}
+
+void web_processor_created(EMSCRIPTEN_WEBAUDIO_T context, bool success, void *user) {
+    if (!success) {
+        std::cerr << "Audio: the AudioWorklet processor could not be made; running silent\n";
+        return;
+    }
+    int channels[1] = {static_cast<int>(kChannels)};
+    EmscriptenAudioWorkletNodeCreateOptions options{};
+    options.numberOfInputs = 0;
+    options.numberOfOutputs = 1;
+    options.outputChannelCounts = channels;
+    const EMSCRIPTEN_WEBAUDIO_T node =
+        emscripten_create_wasm_audio_worklet_node(context, kWorkletName, &options, &web_process, user);
+    emscripten_audio_node_connect(node, context, 0, 0);
+    static_cast<AudioSink::Impl *>(user)->web_running = true;
+    std::cout << "Audio: 44100 Hz stereo playback open (AudioWorklet)\n";
+}
+
+void web_worklet_started(EMSCRIPTEN_WEBAUDIO_T context, bool success, void *user) {
+    if (!success) {
+        std::cerr << "Audio: the AudioWorklet could not start; running silent\n";
+        return;
+    }
+    WebAudioWorkletProcessorCreateOptions options{};
+    options.name = kWorkletName;
+    emscripten_create_wasm_audio_worklet_processor_async(context, &options, &web_processor_created, user);
+}
+#endif
+
 } // namespace
 
 AudioSink::AudioSink() : impl_(std::make_unique<Impl>()) {}
@@ -220,6 +291,17 @@ void AudioSink::initialize() {
         std::cout << "Audio: disabled by MHP3RD_NO_AUDIO\n";
         return;
     }
+#if defined(__EMSCRIPTEN__)
+    // The browser resumes the context on the page's first click or key
+    // (web/pre.js); the ring drains itself in mix() until the node runs.
+    EmscriptenWebAudioCreateAttributes attributes{};
+    attributes.latencyHint = "interactive";
+    attributes.sampleRate = kSampleRate;
+    const EMSCRIPTEN_WEBAUDIO_T context = emscripten_create_audio_context(&attributes);
+    emscripten_start_wasm_audio_worklet_thread_async(context, worklet_stack, sizeof(worklet_stack),
+                                                     &web_worklet_started, &impl);
+    return;
+#endif
 #if defined(MHP3RD_HAS_SDL_AUDIO)
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         std::cerr << "Audio: SDL_InitSubSystem failed (" << SDL_GetError() << "); running silent\n";
@@ -275,7 +357,9 @@ void AudioSink::set_volume(float gain) {
 }
 
 bool AudioSink::has_device() const {
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(__EMSCRIPTEN__)
+    return impl_->web_running;
+#elif defined(MHP3RD_HAS_SDL_AUDIO)
     return impl_->stream != nullptr;
 #else
     return false;
@@ -283,7 +367,9 @@ bool AudioSink::has_device() const {
 }
 
 void AudioSink::set_paused(bool paused) {
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(__EMSCRIPTEN__)
+    impl_->web_paused = paused;
+#elif defined(MHP3RD_HAS_SDL_AUDIO)
     Impl &impl = *impl_;
     if (impl.stream == nullptr) return;
     if (paused) SDL_PauseAudioStreamDevice(impl.stream);
@@ -335,7 +421,9 @@ void AudioSink::mix(std::uint64_t &cursor, const std::int16_t *frames, std::size
     impl.write_end = std::max(impl.write_end, cursor);
 
     // Without a device nothing drains the ring, so keep it moving here.
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(__EMSCRIPTEN__)
+    const bool draining = impl.web_running;
+#elif defined(MHP3RD_HAS_SDL_AUDIO)
     const bool draining = impl.stream != nullptr;
 #else
     const bool draining = false;

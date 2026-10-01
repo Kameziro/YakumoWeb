@@ -164,8 +164,13 @@ bool Layer::attach(gpu::VulkanRenderer &renderer) {
     // Keep the focused row highlighted: on a gamepad there is no pointer.
     io.ConfigNavCursorVisibleAlways = true;
     io.ConfigNavEscapeClearFocusItem = false;
+#if defined(__EMSCRIPTEN__)
+    // The web port draws with WebGPU (gpu/webgpu_renderer.cpp).
+    if (!ImGui_ImplSDL3_InitForOther(renderer.window())) {
+#else
     if (!ImGui_ImplSDL3_InitForVulkan(renderer.window())) {
-        std::cout << "[ui] ImGui_ImplSDL3_InitForVulkan failed; no menu\n";
+#endif
+        std::cout << "[ui] ImGui_ImplSDL3_Init failed; no menu\n";
         ImGui::DestroyContext();
         return false;
     }

@@ -228,6 +228,22 @@ else()
             "--ranlib=${_mhp3rd_ndk_bin}/llvm-ranlib" "--strip=${_mhp3rd_ndk_bin}/llvm-strip"
             # Pages may be 16 KiB on current devices; the NDK's own flag for it.
             "--extra-ldflags=-Wl,-z,max-page-size=16384")
+    elseif(EMSCRIPTEN)
+        # The web port (web/README.md): static libraries, since a page links
+        # no shared ones, built with Emscripten's compilers for plain wasm32:
+        # no assembly and no threads of FFmpeg's own, but with the shared
+        # memory the rest of the program is built with (-pthread).
+        list(REMOVE_ITEM _mhp3rd_ffmpeg_flags --enable-shared --disable-static)
+        get_filename_component(_mhp3rd_em_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+        list(APPEND _mhp3rd_ffmpeg_flags
+            --enable-static --disable-shared
+            --enable-cross-compile --target-os=none --arch=x86_32
+            --disable-asm --disable-inline-asm --disable-stripping
+            --disable-pthreads --disable-w32threads --disable-os2threads
+            "--cc=${_mhp3rd_em_bin}/emcc" "--cxx=${_mhp3rd_em_bin}/em++"
+            "--ar=${_mhp3rd_em_bin}/emar" "--ranlib=${_mhp3rd_em_bin}/emranlib"
+            "--nm=${_mhp3rd_em_bin}/emnm"
+            "--extra-cflags=-pthread -O3" "--extra-ldflags=-pthread")
     elseif(DEFINED ENV{CC})
         list(APPEND _mhp3rd_ffmpeg_flags "--cc=$ENV{CC}")
     endif()
@@ -275,6 +291,14 @@ else()
     set(_versions ${MHP3RD_FFMPEG_SOVERSIONS})
     while(_versions)
         list(POP_FRONT _versions lib soversion)
+        if(EMSCRIPTEN)
+            # Linked into the program itself.
+            add_library(mhp3rd_ffmpeg_${lib} STATIC IMPORTED)
+            set_target_properties(mhp3rd_ffmpeg_${lib} PROPERTIES
+                IMPORTED_LOCATION "${_mhp3rd_ffmpeg_prefix}/lib/lib${lib}.a")
+            target_link_libraries(mhp3rd_ffmpeg INTERFACE mhp3rd_ffmpeg_${lib})
+            continue()
+        endif()
         if(APPLE)
             set(runtime_name "lib${lib}.${soversion}.dylib")
         elseif(ANDROID)

@@ -2,7 +2,13 @@ set(MHP3RD_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # The AOT corpus is derived from the user's executable and is not committed.
 # Until scripts/generate.sh has produced it, link an empty registry instead.
-file(GLOB MHP3RD_GENERATED CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/generated/*.cpp")
+# MHP3RD_GENERATED_CODE=OFF links the empty registry even when a corpus exists,
+# for a quick bootstrap build of a new target such as the web port.
+option(MHP3RD_GENERATED_CODE "Link the generated AOT units when they exist" ON)
+set(MHP3RD_GENERATED)
+if(MHP3RD_GENERATED_CODE)
+    file(GLOB MHP3RD_GENERATED CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/generated/*.cpp")
+endif()
 if(MHP3RD_GENERATED)
     list(LENGTH MHP3RD_GENERATED MHP3RD_GENERATED_COUNT)
     message(STATUS "mhp3rd: ${MHP3RD_GENERATED_COUNT} generated AOT units")
@@ -83,7 +89,44 @@ endif()
 # profile still builds headless on a machine without them.
 option(MHP3RD_RENDERER "Build the Vulkan renderer" ON)
 set(MHP3RD_RENDERER_SOURCES)
-if(MHP3RD_RENDERER)
+set(MHP3RD_WEB_RENDERER OFF)
+if(MHP3RD_RENDERER AND EMSCRIPTEN)
+    # The web port (web/README.md): SDL3 and WebGPU from Emscripten's ports,
+    # and host/gpu/webgpu_renderer.cpp in place of the Vulkan renderer. The
+    # interface sources are the same as below.
+    set(MHP3RD_WEB_RENDERER ON)
+    set(MHP3RD_RENDERER_SOURCES
+        host/gpu/frame_interpolation.cpp
+        host/gpu/frame_pacing.cpp
+        host/gpu/mmpx.cpp
+        host/gpu/ui_textures.cpp
+        host/gpu/webgpu_renderer.cpp
+        host/input/gamepad_devices.cpp
+        host/platform/web_dialogs.cpp
+        host/ui/bindings_editor.cpp
+        host/ui/controllers_screen.cpp
+        host/ui/file_browser.cpp
+        host/ui/font_menu.cpp
+        host/ui/input_script.cpp
+        host/ui/layer.cpp
+        host/ui/menu.cpp
+        host/ui/layered_armor_screen.cpp
+        host/ui/mods_screen.cpp
+        host/ui/save_screen.cpp
+        host/ui/setup_screens.cpp
+        host/ui/text_input.cpp
+        host/ui/touch_editor.cpp
+        host/ui/touch_overlay.cpp
+        host/ui/texture_pack_screen.cpp
+        host/ui/widgets.cpp
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/backends/imgui_impl_sdl3.cpp
+        third_party/imgui/backends/imgui_impl_wgpu.cpp)
+    message(STATUS "mhp3rd: WebGPU renderer enabled (web)")
+elseif(MHP3RD_RENDERER)
     find_package(SDL3 QUIET)
     find_package(Vulkan QUIET)
     find_program(MHP3RD_GLSLANG NAMES glslangValidator glslang)
@@ -293,14 +336,50 @@ if(WIN32)
     target_sources(Yakumo PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Yakumo.rc")
 endif()
 if(MHP3RD_RENDERER)
-    add_dependencies(Yakumo mhp3rd_shaders mhp3rd_version)
+    if(MHP3RD_WEB_RENDERER)
+        add_dependencies(Yakumo mhp3rd_version)
+        target_compile_options(Yakumo PRIVATE --use-port=sdl3 --use-port=emdawnwebgpu)
+        target_link_options(Yakumo PRIVATE --use-port=sdl3 --use-port=emdawnwebgpu)
+    else()
+        add_dependencies(Yakumo mhp3rd_shaders mhp3rd_version)
+        target_link_libraries(Yakumo PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+    endif()
     # The sink opens its own SDL audio subsystem, so it only needs SDL to exist.
     target_compile_definitions(Yakumo PRIVATE MHP3RD_HAS_RENDERER=1 MHP3RD_HAS_SDL_AUDIO=1 MHP3RD_HAS_SDL=1)
     target_include_directories(Yakumo PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_version"
         "${MHP3RD_PROFILE_DIR}/third_party/imgui")
-    target_link_libraries(Yakumo PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+endif()
+if(EMSCRIPTEN)
+    # JSPI suspends the wasm stack while the browser takes its turn, so the
+    # port's blocking loops (the setup screens, the game's frames) keep their
+    # shape. The recompiled code nests deeply: the same 64 MiB stack as on
+    # Linux. The page comes from web/shell.html; web/pre.js keeps the data
+    # directory in IndexedDB.
+    # wasm-opt at -O3 takes minutes on the generated code; a lower level here
+    # links much faster while iterating.
+    set(MHP3RD_WEB_LINK_OPT "" CACHE STRING "Optimization flag for the web link only, for example -O1 (empty: the build type's)")
+    target_link_options(Yakumo PRIVATE
+        ${MHP3RD_WEB_LINK_OPT}
+        -sJSPI
+        -sSTACK_SIZE=64MB
+        -sINITIAL_MEMORY=256MB
+        -sALLOW_MEMORY_GROWTH=1
+        -sEXIT_RUNTIME=1
+        # Workers started with the page: a std::thread then starts at once,
+        # without waiting for the page's thread to give the browser a turn.
+        -sPTHREAD_POOL_SIZE=8
+        # The audio output runs on the browser's audio thread (audio_sink.cpp).
+        -sAUDIO_WORKLET=1
+        -sWASM_WORKERS=1
+        -sEXPORTED_RUNTIME_METHODS=FS
+        -lidbfs.js
+        --pre-js "${PROJECT_SOURCE_DIR}/web/pre.js"
+        --shell-file "${PROJECT_SOURCE_DIR}/web/shell.html")
+    set_target_properties(Yakumo PROPERTIES SUFFIX ".html")
+    set_property(TARGET Yakumo APPEND PROPERTY LINK_DEPENDS
+        "${PROJECT_SOURCE_DIR}/web/shell.html" "${PROJECT_SOURCE_DIR}/web/pre.js")
 endif()
 # The host only: the generated code never sees FFmpeg.
 mhp3rd_use_ffmpeg(Yakumo)
@@ -797,6 +876,26 @@ function(mhp3rd_add_overlay meta_path)
         message(WARNING "mhp3rd: no sources for overlay ${MHP3RD_OVERLAY_PREFIX}")
         return()
     endif()
+
+    if(EMSCRIPTEN)
+        # The web port loads no libraries: the overlays MHP3RD_WEB_OVERLAYS
+        # names are linked into the program and register themselves; the rest
+        # run interpreted.
+        if(NOT MHP3RD_OVERLAY_NAME MATCHES "${MHP3RD_WEB_OVERLAYS}")
+            return()
+        endif()
+        set(entry_point "${CMAKE_CURRENT_BINARY_DIR}/overlays/${MHP3RD_OVERLAY_PREFIX}_linked.cpp")
+        configure_file("${MHP3RD_PROFILE_DIR}/host/overlay_module_linked.cpp.in" "${entry_point}" @ONLY)
+        set(target "overlay_${MHP3RD_OVERLAY_PREFIX}")
+        add_library(${target} OBJECT ${sources} "${entry_point}")
+        target_include_directories(${target} PRIVATE
+            "${source_dir}" "${MHP3RD_PROFILE_DIR}/host" "${PROJECT_SOURCE_DIR}/include")
+        target_compile_options(${target} PRIVATE -O${PSPRECOMP_GENERATED_OPT_LEVEL} -g0)
+        set_target_properties(${target} PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
+        target_sources(Yakumo PRIVATE $<TARGET_OBJECTS:${target}>)
+        set_property(GLOBAL APPEND PROPERTY MHP3RD_LINKED_OVERLAYS "${MHP3RD_OVERLAY_NAME}")
+        return()
+    endif()
     set(entry_point "${CMAKE_CURRENT_BINARY_DIR}/overlays/${MHP3RD_OVERLAY_PREFIX}_module.cpp")
     configure_file("${MHP3RD_PROFILE_DIR}/host/overlay_module.cpp.in" "${entry_point}" @ONLY)
 
@@ -848,9 +947,23 @@ function(mhp3rd_add_overlay meta_path)
     endif()
 endfunction()
 
+# The overlays the web build links in, by name (a regular expression). All 355
+# come to about 1.1 GB of C++, mostly the monsters' (em*) and the weapons'
+# (we*), too much for one program a page loads; the default takes the
+# cutscenes (demo_*), the map parts (P_*) and the small screens.
+set(MHP3RD_WEB_OVERLAYS
+    "^(demo_sub|demo_task|movie_task|cont_task|option_task|install_task|tutorialm|result|edit_task|gallery_task|P_.*)$"
+    CACHE STRING "Overlays linked into the web build (a regular expression over their names)")
+
 file(GLOB MHP3RD_OVERLAY_METADATA CONFIGURE_DEPENDS "${MHP3RD_PROFILE_DIR}/overlays/*/meta.txt")
 foreach(meta IN LISTS MHP3RD_OVERLAY_METADATA)
     mhp3rd_add_overlay("${meta}")
 endforeach()
-list(LENGTH MHP3RD_OVERLAY_METADATA MHP3RD_OVERLAY_COUNT)
-message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay librar(ies) in ${MHP3RD_OVERLAY_DIR}")
+if(EMSCRIPTEN)
+    get_property(MHP3RD_LINKED_OVERLAYS GLOBAL PROPERTY MHP3RD_LINKED_OVERLAYS)
+    list(LENGTH MHP3RD_LINKED_OVERLAYS MHP3RD_OVERLAY_COUNT)
+    message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay corpora linked into the web build")
+else()
+    list(LENGTH MHP3RD_OVERLAY_METADATA MHP3RD_OVERLAY_COUNT)
+    message(STATUS "mhp3rd: ${MHP3RD_OVERLAY_COUNT} overlay librar(ies) in ${MHP3RD_OVERLAY_DIR}")
+endif()

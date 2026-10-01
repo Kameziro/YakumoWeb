@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yakumo</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d0d14; color: #c8c8d0; font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  /* The program sizes the canvas to #screen each frame. */
+  #screen { flex: 1; min-height: 0; overflow: hidden; }
+  #canvas { display: block; outline: none; }
+  #bar { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; }
+  #status { flex: 1; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #toggle { font: inherit; color: inherit; background: #1b1b26; border: 1px solid #33334a; border-radius: 4px;
+            padding: 2px 8px; cursor: pointer; }
+  #toggle:hover { background: #26263a; }
+  #log { max-height: 20vh; overflow: auto; margin: 0; padding: 4px 8px; font: 11px ui-monospace, monospace;
+         background: #08080c; white-space: pre-wrap; }
+  #log:empty, body.log-hidden #log { display: none; }
+</style>
+</head>
+<body class="log-hidden">
+<div id="screen"><canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas></div>
+<div id="bar">
+  <div id="status">Loading…</div>
+  <button id="toggle" type="button" tabindex="-1">Show log</button>
+</div>
+<pre id="log"></pre>
+<script>
+  // No JSPI means no way to suspend the game's loops: say so instead of hanging.
+  if (!("Suspending" in WebAssembly)) {
+    document.getElementById("status").textContent =
+      "This browser lacks WebAssembly JSPI. Use a current Chrome or Edge.";
+  }
+  if (!navigator.gpu) {
+    document.getElementById("status").textContent = "This browser lacks WebGPU. Use a current Chrome or Edge.";
+  }
+
+  // The log starts hidden; the button shows it, and the choice is kept for
+  // the next visit. The canvas takes the room either way.
+  const toggle = document.getElementById("toggle");
+  function showLog(shown) {
+    document.body.classList.toggle("log-hidden", !shown);
+    toggle.textContent = shown ? "Hide log" : "Show log";
+    try { localStorage.setItem("yakumo-log-shown", shown ? "1" : "0"); } catch (error) {}
+  }
+  let logShown = false;
+  try { logShown = localStorage.getItem("yakumo-log-shown") === "1"; } catch (error) {}
+  showLog(logShown);
+  toggle.addEventListener("click", () => {
+    logShown = !logShown;
+    showLog(logShown);
+    toggle.blur();  // keys go back to the game
+  });
+
+  const log = document.getElementById("log");
+  // Keeps the last 200 000 characters, so a long session's log stays light.
+  function append(text) {
+    let content = log.textContent + text + "\n";
+    if (content.length > 200000) content = content.slice(content.indexOf("\n", content.length - 150000) + 1);
+    log.textContent = content;
+    if (logShown) log.scrollTop = log.scrollHeight;
+  }
+  var Module = {
+    canvas: document.getElementById("canvas"),
+    print: (text) => { console.log(text); append(text); },
+    printErr: (text) => { console.error(text); append(text); },
+    setStatus: (text) => { document.getElementById("status").textContent = text || "Running"; },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

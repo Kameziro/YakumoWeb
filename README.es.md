@@ -10,6 +10,22 @@ Una versión nativa de **Monster Hunter Portable 3rd HD Ver.** hecha mediante re
 
 > Esto es una traducción. Si difiere del [README en inglés](README.md), prevalece el inglés. La documentación detallada está en inglés.
 
+## YakumoWeb: Yakumo en el navegador
+
+Este fork añade una versión de Yakumo que se ejecuta en un navegador web. Es el mismo port, con el mismo código del juego recompilado, compilado a WebAssembly con Emscripten en lugar de a un ejecutable nativo:
+
+- **Gráficos:** un renderizador WebGPU sustituye al de Vulkan detrás de la misma interfaz, así que el kernel, los módulos HLE y los menús no cambian.
+- **Los bucles del juego:** WebAssembly JSPI suspende el programa mientras el navegador dibuja cada fotograma, de modo que los bucles bloqueantes del juego conservan su forma.
+- **Sonido:** la música, los efectos y los vídeos pasan por FFmpeg compilado para la web y por un AudioWorklet en el propio hilo de audio del navegador.
+- **Tus datos:** las partidas guardadas y los ajustes se quedan en el navegador (IndexedDB); la imagen del disco se descarga una sola vez y se guarda en el almacenamiento privado del navegador.
+- **Código:** las cinemáticas, las partes de los mapas y las pantallas pequeñas recompiladas van enlazadas en el programa; los demás overlays se interpretan.
+
+**Estado: jugable** en las versiones actuales de Chrome y Edge. La aldea, sus cinemáticas y las misiones funcionan a 30 fps y a velocidad completa, con sonido, música, vídeos, teclado, ratón y partidas guardadas. El mando, Firefox y Safari no se han probado. Consulta [web/README.md](web/README.md) (en inglés) para saber cómo funciona, cómo compilarlo, qué falta todavía y las etapas.
+
+**Solo para ti.** La versión web se hace a partir de tu propia imagen del disco, igual que la nativa, así que lo que sirve deriva de tu copia del juego. Sírvela solo para ti, protegida con contraseña (ver [web/nginx.conf.example](web/nginx.conf.example)). No la publiques nunca.
+
+El trabajo está en la rama `web`, que sigue la rama `main` de este proyecto mediante merges.
+
 ## Aviso legal
 
 **Yakumo** es un proyecto independiente y de código abierto, y no está afiliado, autorizado, patrocinado ni respaldado por CAPCOM, Sony ni ninguna de sus filiales.

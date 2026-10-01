@@ -1,0 +1,41 @@
+# Checks that the web port builds, and that the native build and its unit
+# tests still do, in the same container as web/docker. A checkout holds no
+# game data, so this builds the bootstrap (no generated code, no overlays):
+# the port's own code, which is what an upstream merge can break.
+name: web
+
+on:
+  push:
+    branches: [web]
+  pull_request:
+    branches: [web]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the build image
+        run: docker build -t yakumo-web-build web/docker
+
+      - name: Web build (Emscripten)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src yakumo-web-build bash -lc '
+            set -euo pipefail
+            . /opt/emsdk/emsdk_env.sh > /dev/null 2>&1
+            emcmake cmake -S . -B out/web -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=mhp3rd \
+                -DMHP3RD_FFMPEG=bundled -DPSPRECOMP_BUILD_TESTS=OFF -DPSPRECOMP_BUILD_PROFILE_TESTS=OFF \
+                -DMHP3RD_WEB_LINK_OPT=-O1
+            cmake --build out/web --target Yakumo
+            ls -la out/web/bin'
+
+      - name: Native build and unit tests
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src yakumo-web-build bash -lc '
+            set -euo pipefail
+            cmake -S . -B out/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=mhp3rd
+            cmake --build out/linux --target Yakumo psprecomp_tests mhp3rd_savedata_tests
+            ctest --test-dir out/linux --output-on-failure -R "psprecomp_tests|mhp3rd_savedata_tests"'
