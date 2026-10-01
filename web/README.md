@@ -76,6 +76,31 @@ How the port fits in:
 - The kernel's idle hook (`present_until`) gives the browser the time the kernel is about to sleep to keep PSP speed, since a sleep on the page's thread would spin.
 - `web/pre.js` mounts `/libsdl`, where `SDL_GetPrefPath` puts the data directory, on IndexedDB before `main()` starts, and writes every change back on its own.
 
+## Ad hoc play
+
+A page has no TCP and no UDP, so the web port goes on line through a WebSocket gateway, `web/adhoc-gateway`, written for Node. For every TCP connection the native client would open to a PSP ad hoc server, the page opens a WebSocket to the gateway, which opens that connection and carries the byte stream unchanged:
+
+```
+page --wss /adhoc/ctl---> gateway --TCP 27312--> ad hoc server <--TCP-- desktop players
+     --wss /adhoc/relay->         --TCP 27313-->
+```
+
+The server is any PSP ad hoc server: `Yakumo --adhoc-server`, a desktop player's Network > Host a session, or another one speaking the same protocols. Web and desktop players on the same server share its halls.
+
+```bash
+Yakumo --adhoc-server                  # on the machine that serves the page, or elsewhere
+cd web/adhoc-gateway && npm install
+ADHOC_SERVER=127.0.0.1:27312 node gateway.mjs
+```
+
+The gateway listens on `127.0.0.1:27380` and connects only to `ADHOC_SERVER` and the port after it; any other path is refused. `ADHOC_ALLOWED_ORIGIN` restricts the page origins it accepts, and `ADHOC_MAX_PER_ADDRESS` the connections per player address (64). `web/nginx.conf.example` passes `/adhoc/` to it, behind the page's password. `npm test` runs its tests.
+
+`web/deploy` puts it all on an Ubuntu or Debian server with Nginx, Docker and Node: `bundle.sh` packs the page, the gateway and the ad hoc server (a Docker image, since a Yakumo build needs SDL3, which Ubuntu 24.04 lacks), and `install.sh`, run there as root with `DOMAIN` set, installs them, with HTTPS and a password when Nginx does not serve that domain yet.
+
+In the game, Network > Server empty means this site's `/adhoc`; it also takes another path on the site, or a `ws://` or `wss://` address (`ws://127.0.0.1:27380/adhoc` with `serve.py`). The page cannot host a session or find one on the local network, so those parts of the Network page are left out.
+
+In the page, the ad hoc client's network thread owns the WebSockets: they live in its worker, and instead of waiting in `poll()` it runs one pass of its loop every few milliseconds from a timer, so the worker's event loop can deliver their events. Two tabs of one site share the data directory, and with it the player's address and name: a second player on one computer needs another browser profile.
+
 ## Milestones
 
 | # | Milestone | Status |

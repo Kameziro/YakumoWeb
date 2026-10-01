@@ -1,0 +1,22 @@
+# The WebSocket gateway for the web port's ad hoc play (web/adhoc-gateway),
+# installed in /opt/yakumo/adhoc-gateway by web/deploy/install.sh.
+[Unit]
+Description=Yakumo ad hoc WebSocket gateway
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Environment=ADHOC_GATEWAY_LISTEN=127.0.0.1:27380
+Environment=ADHOC_SERVER=127.0.0.1:27312
+WorkingDirectory=/opt/yakumo/adhoc-gateway
+ExecStart=/usr/bin/node gateway.mjs
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

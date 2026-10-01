@@ -1,0 +1,18 @@
+{
+  "name": "yakumo-adhoc-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Carries the Yakumo web port's ad hoc connections to a PSP ad hoc server over WebSocket",
+  "license": "MIT",
+  "type": "module",
+  "main": "gateway.mjs",
+  "bin": { "yakumo-adhoc-gateway": "gateway.mjs" },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node gateway.mjs",
+    "test": "node --test gateway.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
