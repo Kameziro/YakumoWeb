@@ -1317,6 +1317,25 @@ std::string players_text(std::size_t count) {
 }
 
 // Hosting and joining a session.
+#if defined(__EMSCRIPTEN__)
+// The web port can neither host nor find sessions on the local network: a page
+// cannot accept connections or use UDP. Every player goes on line through a
+// WebSocket gateway to one server (web/adhoc-gateway).
+void play_together() {
+    settings::Settings &s = settings::current();
+    section("Play together");
+    info_row("In the browser",
+             "Players meet on the server behind this site's gateway, or the gateway set under Server. Turn on Ad "
+             "hoc play; then everyone enters the Online Guild Hall and picks the same hall. Desktop players join "
+             "the same server directly.");
+    info_row("Server in use", adhoc_server_address());
+    for (const std::string &address : s.adhoc_recent) {
+        const bool joined = s.adhoc && s.adhoc_server == address;
+        const std::string label = (joined ? "Joined " : "Join ") + address + "   recent###recent " + address;
+        if (button_row(label.c_str(), {false, {}, "A gateway you joined before."})) adhoc_join(address);
+    }
+}
+#else
 void play_together() {
     settings::Settings &s = settings::current();
     static std::string copied;
@@ -1404,6 +1423,7 @@ void play_together() {
         if (button_row(label.c_str(), {false, {}, "A session you joined before."})) adhoc_join(address);
     }
 }
+#endif
 
 void Menu::network() {
     settings::Settings &s = settings::current();
@@ -1418,11 +1438,17 @@ void Menu::network() {
         settings::save();
         adhoc_apply_settings();
     }
+#if defined(__EMSCRIPTEN__)
+    constexpr const char *kServerHelp = "The WebSocket gateway the game goes on line through: empty for this site's "
+                                        "/adhoc, a path on this site, or a ws:// or wss:// address. Applies the next "
+                                        "time the game goes on line.";
+#else
+    constexpr const char *kServerHelp = "The session or PSP ad hoc server the game goes on line with: host name or "
+                                        "address, host:port if it is not on 27312. Joining fills it in; for a public "
+                                        "server, type its name. Applies the next time the game goes on line.";
+#endif
     if (text_row("server", "Server", s.adhoc_server, 100u, true, host_character,
-                 options_for("network.server", "The session or PSP ad hoc server the game goes on line with: host "
-                                               "name or address, host:port if it is not on 27312. Joining fills "
-                                               "it in; for a public server, type its name. Applies the next time "
-                                               "the game goes on line."))) {
+                 options_for("network.server", kServerHelp))) {
         settings::save();
         adhoc_apply_settings();
     }
@@ -1444,6 +1470,7 @@ void Menu::network() {
         info_row("Relayed", std::to_string(st.relayed_packets) + " packets (" + format_bytes(st.relayed_bytes) +
                                 "), " + std::to_string(st.dropped) + " datagrams dropped");
     }
+#if !defined(__EMSCRIPTEN__)
     {
         const adhoc::DiscoveryStatus ds = adhoc::Discovery::get().status();
         std::string text = ds.listening ? "Listening on UDP " + std::to_string(adhoc::kDiscoveryPort) + ", " +
@@ -1458,6 +1485,7 @@ void Menu::network() {
                      host.join_address() + ", " + players_text(host.info.players) + ", " + host.info.product +
                          ", heard " + format_duration(host.heard_ms) + " ago");
     }
+#endif
     if (!d.server_address.empty()) info_row("Server address", d.server_address);
     info_row("You", (s.adhoc_mac.empty() ? std::string("address made up on first use") : s.adhoc_mac) +
                         (d.nickname.empty() ? "" : "   " + d.nickname));

@@ -481,7 +481,7 @@ The Android app starts from other defaults where a phone differs, with the same 
 | System | Add a timestamp to the backup name | `saves.backup_timestamp` | | On (default): each backup from *Back up saves…* is a new folder named by its time; off: plain folder names, replaced after asking |
 | System | Remind me to back up after updates | `saves.backup_reminder` | `MHP3RD_BACKUP_REMINDER` | On (default): the first start of a new release asks you to back up your saves; see [Backups](#where-saves-live-and-how-to-back-them-up). `saves.backup_reminded` records the release that last asked |
 | Network | Ad hoc play | `network.adhoc` | `MHP3RD_ADHOC` | Off (default) or on; off, the game reports the wireless switch as off |
-| Network | Server | `network.server` | `MHP3RD_ADHOC_SERVER` | Host name or address of a PSP ad hoc server, optionally `host:port`; empty by default |
+| Network | Server | `network.server` | `MHP3RD_ADHOC_SERVER` | Host name or address of a PSP ad hoc server, optionally `host:port`; empty by default. In the web port, the WebSocket gateway instead: empty for the site's `/adhoc`, a path, or a `ws://`/`wss://` address ([web/README.md](../../web/README.md#ad-hoc-play)) |
 | Network | Nickname | `network.nickname` | `MHP3RD_ADHOC_NICKNAME` | The name other players see; empty uses the hunter name |
 
 Everything applies without a restart, apart from mods that change a file's size (see [Mods](#mods)); the name settings take effect the next time the game asks for a name. The System section has *Resume*, *Take a screenshot* and *Open the screenshots folder* (see [Screenshots](#screenshots)), *Open the data folder*, *Set up game data again…* and *Quit game* (both of the last two ask first), the *Saves* rows described under [Saving and loading](#importing-a-save-from-a-psp), and the build version, the data and saves folders and the GPU. Each section but Mods has a button that restores its defaults.
@@ -1066,7 +1066,7 @@ The renderer then leaves out the HUD packets' draws, and nothing else: their oth
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `MHP3RD_ADHOC` | off | `1` turns ad hoc play on (menu: Ad hoc play) |
-| `MHP3RD_ADHOC_SERVER` | none | PSP ad hoc server, `host` or `host:port` (menu: Server) |
+| `MHP3RD_ADHOC_SERVER` | none | PSP ad hoc server, `host` or `host:port`; in the web port, its gateway (menu: Server) |
 | `MHP3RD_ADHOC_NICKNAME` | the hunter name | Name other players see (menu: Nickname) |
 | `MHP3RD_ADHOC_MAC` | made up once | The address other players know you by, `xx:xx:xx:xx:xx:xx` |
 | `MHP3RD_ADHOC_OVERLAY` | off | `1` shows the network overlay from the start |

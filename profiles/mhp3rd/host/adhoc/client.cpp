@@ -18,6 +18,134 @@
 #include <sstream>
 #include <thread>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_js.h>
+#include <emscripten/emscripten.h>
+#include <emscripten/eventloop.h>
+#include <pthread.h>
+
+// The web port's server connections. A browser has no TCP, so every
+// connection the native client would open is a WebSocket to the gateway in
+// web/adhoc-gateway, which opens that TCP connection for it and carries the
+// byte stream unchanged. Only the network thread calls these: the sockets live
+// in its worker, and that worker's event loop delivers their events between
+// two passes of the network loop (Impl::run).
+
+// The URL of the gateway's `kind` ("ctl" or "relay") path for the Server
+// setting: a ws:// or wss:// URL, an http(s):// one, a path on the page's own
+// site such as /adhoc, or a host[:port] reached the way the page itself was.
+// A URL without a path gets /adhoc. 0 when the setting is no such address.
+EM_JS(int, yakumo_adhoc_ws_url, (const char *server, const char *kind, char *out, int size), {
+  try {
+    const secure = location.protocol === "https:";
+    let text = UTF8ToString(server).trim();
+    if (text.startsWith("/")) text = (secure ? "wss://" : "ws://") + location.host + text;
+    else if (text.indexOf("://") < 0) text = (secure ? "wss://" : "ws://") + text;
+    const url = new URL(text);
+    if (url.protocol === "http:") url.protocol = "ws:";
+    else if (url.protocol === "https:") url.protocol = "wss:";
+    if (url.protocol !== "ws:" && url.protocol !== "wss:") return 0;
+    // No regular expressions in here: the preprocessor drops their backslashes.
+    let base = url.pathname;
+    while (base.endsWith("/")) base = base.slice(0, -1);
+    url.pathname = (base || "/adhoc") + "/" + UTF8ToString(kind);
+    url.hash = "";
+    stringToUTF8(url.href, out, size);
+    return 1;
+  } catch (e) {
+    return 0;
+  }
+});
+
+// Opens a WebSocket; its id, or -1.
+EM_JS(int, yakumo_adhoc_ws_open, (const char *url), {
+  const sockets = globalThis.yakumoAdhocSockets || (globalThis.yakumoAdhocSockets = { next: 1, map: new Map() });
+  let ws;
+  try {
+    ws = new WebSocket(UTF8ToString(url));
+  } catch (e) {
+    return -1;
+  }
+  ws.binaryType = "arraybuffer";
+  // state: 0 connecting, 1 open, 2 closed. Messages that arrived before the
+  // close stay queued until they are read.
+  const entry = { ws: ws, queue: [], offset: 0, state: 0 };
+  ws.onopen = () => {
+    if (entry.state === 0) entry.state = 1;
+  };
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) entry.queue.push(new Uint8Array(event.data));
+  };
+  ws.onerror = () => {
+    entry.state = 2;
+  };
+  ws.onclose = () => {
+    entry.state = 2;
+  };
+  const id = sockets.next++;
+  sockets.map.set(id, entry);
+  return id;
+});
+
+// 0 connecting, 1 open, 2 closed or failed.
+EM_JS(int, yakumo_adhoc_ws_state, (int id), {
+  const entry = globalThis.yakumoAdhocSockets && globalThis.yakumoAdhocSockets.map.get(id);
+  return entry ? entry.state : 2;
+});
+
+// Copies up to `size` received bytes to `buffer`: the count, or -1 once the
+// socket is closed and everything it received has been read.
+EM_JS(int, yakumo_adhoc_ws_receive, (int id, char *buffer, int size), {
+  const entry = globalThis.yakumoAdhocSockets && globalThis.yakumoAdhocSockets.map.get(id);
+  if (!entry) return -1;
+  let count = 0;
+  while (count < size && entry.queue.length > 0) {
+    const chunk = entry.queue[0];
+    const take = Math.min(size - count, chunk.length - entry.offset);
+    HEAPU8.set(chunk.subarray(entry.offset, entry.offset + take), buffer + count);
+    count += take;
+    entry.offset += take;
+    if (entry.offset === chunk.length) {
+      entry.queue.shift();
+      entry.offset = 0;
+    }
+  }
+  return count === 0 && entry.state === 2 ? -1 : count;
+});
+
+// Bytes handed to the WebSocket and not yet sent.
+EM_JS(int, yakumo_adhoc_ws_buffered, (int id), {
+  const entry = globalThis.yakumoAdhocSockets && globalThis.yakumoAdhocSockets.map.get(id);
+  return entry ? entry.ws.bufferedAmount : 0;
+});
+
+// Sends `size` bytes as one binary message: 1, or 0 when the socket is not
+// open.
+EM_JS(int, yakumo_adhoc_ws_send, (int id, const char *data, int size), {
+  const entry = globalThis.yakumoAdhocSockets && globalThis.yakumoAdhocSockets.map.get(id);
+  if (!entry || entry.state !== 1) return 0;
+  try {
+    // A copy: a WebSocket cannot send a view of shared memory.
+    entry.ws.send(HEAPU8.slice(data, data + size));
+    return 1;
+  } catch (e) {
+    entry.state = 2;
+    return 0;
+  }
+});
+
+EM_JS(void, yakumo_adhoc_ws_close, (int id), {
+  const sockets = globalThis.yakumoAdhocSockets;
+  const entry = sockets && sockets.map.get(id);
+  if (!entry) return;
+  sockets.map.delete(id);
+  entry.ws.onopen = entry.ws.onmessage = entry.ws.onerror = entry.ws.onclose = null;
+  try {
+    entry.ws.close();
+  } catch (e) {
+  }
+});
+#endif
 
 namespace mhp3rd::adhoc {
 
@@ -52,6 +180,11 @@ constexpr auto kGroupGrace = milliseconds(10000);
 constexpr auto kPendingConnectionLife = milliseconds(4500);
 constexpr std::size_t kMaxQueuedOutput = 512u * 1024u;
 constexpr std::size_t kReadChunk = 16u * 1024u;
+#if defined(__EMSCRIPTEN__)
+// Output waits while the WebSocket holds this much not yet sent, as a full
+// socket buffer holds it back on a native link.
+constexpr std::size_t kWebSendWindow = 256u * 1024u;
+#endif
 
 using net::Address;
 using net::close_socket;
@@ -65,6 +198,7 @@ using net::Socket;
 using net::socket_error;
 using net::would_block;
 
+#if !defined(__EMSCRIPTEN__)
 // "host", "host:port", "[v6]" or "[v6]:port".
 void split_server(const std::string &server, std::string &host, std::uint16_t &port) {
     host = server;
@@ -136,6 +270,27 @@ void tune_socket(Socket s) {
 #endif
 }
 
+// Where the server is reached: its adhocctl address.
+using Endpoint = Address;
+#else
+// Where the web port reaches the server: the gateway's two WebSocket URLs.
+struct Endpoint {
+    std::string ctl;
+    std::string relay;
+    [[nodiscard]] std::string describe() const { return ctl; }
+};
+
+// The endpoint for the Server setting; none when it is not an address.
+std::optional<Endpoint> gateway_endpoint(const std::string &server) {
+    char ctl[1024];
+    char relay[1024];
+    if (yakumo_adhoc_ws_url(server.c_str(), "ctl", ctl, static_cast<int>(sizeof(ctl))) == 0 ||
+        yakumo_adhoc_ws_url(server.c_str(), "relay", relay, static_cast<int>(sizeof(relay))) == 0)
+        return std::nullopt;
+    return Endpoint{ctl, relay};
+}
+#endif
+
 // The last lines logged, for "Save network log".
 constexpr std::size_t kLogLines = 6000;
 
@@ -194,6 +349,7 @@ struct Backoff {
     void reset() { current = milliseconds(0); }
 };
 
+#if !defined(__EMSCRIPTEN__)
 // One TCP connection to the server.
 struct Link {
     Socket socket{kNoSocket};
@@ -305,6 +461,99 @@ struct Link {
         else if (now - last_write > kStallTimeout) fail();
     }
 };
+#else
+// The web port's link: a WebSocket to the gateway, which carries the same
+// byte stream as the native TCP connection.
+struct Link {
+    int socket{-1};      // the WebSocket's id
+    bool open{};         // the WebSocket is open
+    bool failed{};       // closed by the gateway or the server, refused, or broken
+    std::string input;
+    std::string output;
+    Clock::time_point started{};
+    Clock::time_point last_write{};  // last time output shrank or was empty
+    bool pause_reading{};
+
+    [[nodiscard]] bool active() const { return socket >= 0; }
+
+    bool start(const std::string &url) {
+        close();
+        failed = false;
+        socket = yakumo_adhoc_ws_open(url.c_str());
+        if (socket < 0) {
+            socket = -1;
+            failed = true;
+            return false;
+        }
+        started = Clock::now();
+        last_write = started;
+        return true;
+    }
+
+    void close() {
+        if (socket >= 0) yakumo_adhoc_ws_close(socket);
+        socket = -1;
+        open = false;
+        input.clear();
+        output.clear();
+        pause_reading = false;
+    }
+
+    void fail() {
+        close();
+        failed = true;
+    }
+
+    // Once per pass of the network loop: completes the opening, reads and
+    // writes. The poll events are the native link's; there are none here.
+    void service(short) {
+        if (socket < 0) return;
+        const auto now = Clock::now();
+        if (!open) {
+            const int state = yakumo_adhoc_ws_state(socket);
+            if (state == 1) {
+                open = true;
+                last_write = now;
+            } else {
+                if (state == 2 || now - started > kConnectTimeout) fail();
+                return;
+            }
+        }
+        char buffer[kReadChunk];
+        for (int round = 0; round < 8 && !pause_reading; ++round) {
+            const int count = yakumo_adhoc_ws_receive(socket, buffer, static_cast<int>(sizeof(buffer)));
+            if (count > 0) {
+                input.append(buffer, static_cast<std::size_t>(count));
+                if (static_cast<std::size_t>(count) < sizeof(buffer)) break;
+                continue;
+            }
+            if (count < 0) {
+                // Keep what arrived before the close for the owner to parse.
+                std::string remaining = std::move(input);
+                fail();
+                input = std::move(remaining);
+                return;
+            }
+            break;
+        }
+        flush();
+    }
+
+    void flush() {
+        if (socket < 0 || !open) return;
+        const auto now = Clock::now();
+        if (!output.empty() && yakumo_adhoc_ws_buffered(socket) < static_cast<int>(kWebSendWindow)) {
+            if (yakumo_adhoc_ws_send(socket, output.data(), static_cast<int>(output.size())) == 0) {
+                fail();
+                return;
+            }
+            output.clear();
+        }
+        if (output.empty()) last_write = now;
+        else if (now - last_write > kStallTimeout) fail();
+    }
+};
+#endif
 
 struct PendingConnection {
     Mac mac{};
@@ -367,10 +616,10 @@ struct Client::Impl {
     std::uint64_t generation{};  // bumps on start() so a stale resolution is ignored
 
     // Server connection.
-    std::vector<Address> addresses;
+    std::vector<Endpoint> addresses;
     std::size_t address_index{};
     bool resolving{};
-    std::optional<Address> server;  // the adhocctl address that last worked
+    std::optional<Endpoint> server;  // the adhocctl address that last worked
     std::uint16_t relay_port{kRelayPort};
     Link ctl;
     bool logged_in{};
@@ -672,9 +921,13 @@ struct Client::Impl {
         if (!ctl.active()) {
             if (resolving || now < ctl_retry_at) return;
             if (addresses.empty()) return;  // run() resolves outside the lock
-            const Address address = addresses[address_index % addresses.size()];
+            const Endpoint address = addresses[address_index % addresses.size()];
             trace("connecting to " + address.describe());
+#if defined(__EMSCRIPTEN__)
+            if (!ctl.start(address.ctl)) return;
+#else
             if (!ctl.start(address)) return;
+#endif
             server = address;
             return;
         }
@@ -694,7 +947,11 @@ struct Client::Impl {
         }
     }
 
+#if defined(__EMSCRIPTEN__)
+    std::string relay_address() const { return server->relay; }
+#else
     Address relay_address() const { return server->with_port(relay_port); }
+#endif
 
     void start_relay(Link &link, const std::string &init, const std::string &what) {
         if (!link.start(relay_address())) return;
@@ -909,7 +1166,9 @@ struct Client::Impl {
 
     std::optional<double> ctl_rtt_ms() const {
         if (!ctl.open) return std::nullopt;
-#if defined(__APPLE__) && defined(TCP_CONNECTION_INFO)
+#if defined(__EMSCRIPTEN__)
+        // A WebSocket does not tell.
+#elif defined(__APPLE__) && defined(TCP_CONNECTION_INFO)
         tcp_connection_info info{};
         socklen_t length = sizeof(info);
         if (getsockopt(ctl.socket, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &length) == 0 && info.tcpi_srtt != 0u)
@@ -1020,87 +1279,134 @@ struct Client::Impl {
         snapshot = std::move(d);
     }
 
-    // The network thread. Holds the lock except in poll() and name lookups.
-    void run() {
-        std::vector<PollEntry> entries;
-        std::vector<Link *> links;
-        while (!quit) {
-            std::string to_resolve;
-            std::uint64_t resolve_generation = 0;
-            {
-                std::unique_lock lock(mutex);
-                const auto now = Clock::now();
-                if (active && !identity.server.empty() && addresses.empty() && !resolving && now >= ctl_retry_at) {
-                    resolving = true;
-                    to_resolve = identity.server;
-                    resolve_generation = generation;
-                }
-                maintain_ctl(now);
-                maintain_datagrams(now);
-                maintain_streams(now);
-                entries.clear();
-                links.clear();
-                const auto add = [&](Link &link) {
-                    if (!link.active()) return;
-                    link.flush();
-                    if (!link.active()) return;
-                    PollEntry entry{};
-                    entry.fd = link.socket;
-                    entry.events = static_cast<short>((link.pause_reading ? 0 : POLLIN) |
-                                                      (!link.open || !link.output.empty() ? POLLOUT : 0));
-                    entries.push_back(entry);
-                    links.push_back(&link);
-                };
-                add(ctl);
-                for (auto &[handle, socket] : datagrams) add(socket.link);
-                for (auto &[handle, socket] : streams) add(socket.link);
+    // One pass of the network loop. Holds the lock except in poll() and name
+    // lookups.
+    void step(std::vector<PollEntry> &entries, std::vector<Link *> &links) {
+        std::string to_resolve;
+        std::uint64_t resolve_generation = 0;
+        {
+            std::unique_lock lock(mutex);
+            const auto now = Clock::now();
+            if (active && !identity.server.empty() && addresses.empty() && !resolving && now >= ctl_retry_at) {
+                resolving = true;
+                to_resolve = identity.server;
+                resolve_generation = generation;
             }
-            if (!to_resolve.empty()) {
-                std::string host;
-                std::uint16_t port = kAdhocctlPort;
-                split_server(to_resolve, host, port);
-                {
-                    std::lock_guard lock(mutex);
-                    relay_port = relay_port_for(port);
-                }
-                trace("resolving " + host);
-                std::vector<Address> found = resolve(host, port);
-                std::lock_guard lock(mutex);
-                resolving = false;
-                if (resolve_generation == generation) {
-                    if (found.empty()) {
-                        ++failed_attempts;
-                        if (failed_attempts == 1u || failed_attempts % 10u == 0u)
-                            report("cannot resolve the ad hoc server " + host);
-                        ctl_retry_at = Clock::now() + ctl_backoff.next();
-                    } else {
-                        addresses = std::move(found);
-                        address_index = 0;
-                    }
-                }
-                continue;
-            }
-            const int ready = poll_sockets(entries.data(), entries.size(), kPollIntervalMs);
-            std::lock_guard lock(mutex);
-            for (std::size_t i = 0; i < entries.size(); ++i) {
-                // A socket the game closed meanwhile is gone from the maps only
-                // when this thread erases it, so the pointer is still valid.
-                Link &link = *links[i];
-                if (link.socket != entries[i].fd) continue;
-                link.service(ready > 0 ? entries[i].revents : static_cast<short>(0));
-            }
-            if (!ctl.input.empty()) handle_ctl_input();
-            for (auto &[handle, socket] : datagrams)
-                if (!socket.link.input.empty()) parse_datagrams(handle, socket);
-            for (auto &[handle, socket] : streams)
-                if (!socket.link.input.empty()) parse_stream(handle, socket);
-            if (Clock::now() - snapshot_at >= milliseconds(250)) publish();
+            maintain_ctl(now);
+            maintain_datagrams(now);
+            maintain_streams(now);
+            entries.clear();
+            links.clear();
+            const auto add = [&](Link &link) {
+                if (!link.active()) return;
+                link.flush();
+                if (!link.active()) return;
+#if !defined(__EMSCRIPTEN__)
+                PollEntry entry{};
+                entry.fd = link.socket;
+                entry.events = static_cast<short>((link.pause_reading ? 0 : POLLIN) |
+                                                  (!link.open || !link.output.empty() ? POLLOUT : 0));
+                entries.push_back(entry);
+#endif
+                links.push_back(&link);
+            };
+            add(ctl);
+            for (auto &[handle, socket] : datagrams) add(socket.link);
+            for (auto &[handle, socket] : streams) add(socket.link);
         }
+        if (!to_resolve.empty()) {
+#if defined(__EMSCRIPTEN__)
+            trace("gateway for " + to_resolve);
+            const std::optional<Endpoint> endpoint = gateway_endpoint(to_resolve);
+            std::vector<Endpoint> found;
+            if (endpoint) found.push_back(*endpoint);
+            const std::string host = to_resolve;
+#else
+            std::string host;
+            std::uint16_t port = kAdhocctlPort;
+            split_server(to_resolve, host, port);
+            {
+                std::lock_guard lock(mutex);
+                relay_port = relay_port_for(port);
+            }
+            trace("resolving " + host);
+            std::vector<Endpoint> found = resolve(host, port);
+#endif
+            std::lock_guard lock(mutex);
+            resolving = false;
+            if (resolve_generation == generation) {
+                if (found.empty()) {
+                    ++failed_attempts;
+                    if (failed_attempts == 1u || failed_attempts % 10u == 0u)
+                        report("cannot resolve the ad hoc server " + host);
+                    ctl_retry_at = Clock::now() + ctl_backoff.next();
+                } else {
+                    addresses = std::move(found);
+                    address_index = 0;
+                }
+            }
+            return;
+        }
+#if defined(__EMSCRIPTEN__)
+        std::lock_guard lock(mutex);
+        for (Link *link : links) link->service(0);
+#else
+        const int ready = poll_sockets(entries.data(), entries.size(), kPollIntervalMs);
+        std::lock_guard lock(mutex);
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            // A socket the game closed meanwhile is gone from the maps only
+            // when this thread erases it, so the pointer is still valid.
+            Link &link = *links[i];
+            if (link.socket != entries[i].fd) continue;
+            link.service(ready > 0 ? entries[i].revents : static_cast<short>(0));
+        }
+#endif
+        if (!ctl.input.empty()) handle_ctl_input();
+        for (auto &[handle, socket] : datagrams)
+            if (!socket.link.input.empty()) parse_datagrams(handle, socket);
+        for (auto &[handle, socket] : streams)
+            if (!socket.link.input.empty()) parse_stream(handle, socket);
+        if (Clock::now() - snapshot_at >= milliseconds(250)) publish();
+    }
+
+    void close_links() {
         std::lock_guard lock(mutex);
         ctl.close();
         for (auto &[handle, socket] : datagrams) socket.link.close();
         for (auto &[handle, socket] : streams) socket.link.close();
     }
+
+#if defined(__EMSCRIPTEN__)
+    std::vector<PollEntry> web_entries;
+    std::vector<Link *> web_links;
+
+    static bool web_pass(double, void *user) {
+        Impl &self = *static_cast<Impl *>(user);
+        if (self.quit) {
+            self.close_links();
+            pthread_exit(nullptr);
+        }
+        self.step(self.web_entries, self.web_links);
+        return true;
+    }
+
+    // The network thread. The WebSockets' events only arrive while the
+    // worker's event loop runs, so instead of a loop that waits in poll(), a
+    // timer runs one pass every few milliseconds and the thread returns to
+    // the event loop in between.
+    void run() {
+        emscripten_set_timeout_loop(&Impl::web_pass, kPollIntervalMs, this);
+        emscripten_exit_with_live_runtime();
+    }
+#else
+    // The network thread.
+    void run() {
+        std::vector<PollEntry> entries;
+        std::vector<Link *> links;
+        while (!quit) step(entries, links);
+        close_links();
+    }
+#endif
 };
 
 // Never destroyed: its thread is stopped by shutdown() before the process
@@ -1114,7 +1420,14 @@ void Client::shutdown() noexcept {
     try {
         stop();
         impl_->quit = true;
+#if defined(__EMSCRIPTEN__)
+        // The thread ends at its next pass. Waiting for it would hold the
+        // page's thread, which the worker's ending may need; the client is
+        // never destroyed, so the pass can still use it.
+        if (impl_->thread.joinable()) impl_->thread.detach();
+#else
         if (impl_->thread.joinable()) impl_->thread.join();
+#endif
     } catch (...) {
     }
 }
