@@ -95,6 +95,8 @@ ADHOC_SERVER=127.0.0.1:27312 node gateway.mjs
 
 The gateway listens on `127.0.0.1:27380` and connects only to `ADHOC_SERVER` and the port after it; any other path is refused. `ADHOC_ALLOWED_ORIGIN` restricts the page origins it accepts, and `ADHOC_MAX_PER_ADDRESS` the connections per player address (64). `web/nginx.conf.example` passes `/adhoc/` to it, behind the page's password. `npm test` runs its tests.
 
+`web/deploy` puts it all on an Ubuntu or Debian server with Nginx, Docker and Node: `bundle.sh` packs the page, the gateway and the ad hoc server (a Docker image, since a Yakumo build needs SDL3, which Ubuntu 24.04 lacks), and `install.sh`, run there as root with `DOMAIN` set, installs them, with HTTPS and a password when Nginx does not serve that domain yet.
+
 In the game, Network > Server empty means this site's `/adhoc`; it also takes another path on the site, or a `ws://` or `wss://` address (`ws://127.0.0.1:27380/adhoc` with `serve.py`). The page cannot host a session or find one on the local network, so those parts of the Network page are left out.
 
 In the page, the ad hoc client's network thread owns the WebSockets: they live in its worker, and instead of waiting in `poll()` it runs one pass of its loop every few milliseconds from a timer, so the worker's event loop can deliver their events. Two tabs of one site share the data directory, and with it the player's address and name: a second player on one computer needs another browser profile.

@@ -1,0 +1,16 @@
+# The ad hoc server alone (Yakumo --adhoc-server) in a container, for a host
+# whose distribution lacks the libraries a Yakumo build links, such as SDL3 on
+# Ubuntu 24.04. The build context holds a Linux build's bin/ directory: the
+# Yakumo executable and its lib/ (a bootstrap build is enough; the server
+# needs no game data).
+#
+#   docker build -f web/deploy/Dockerfile.adhoc-server -t yakumo-adhoc-server out/<build>/bin
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libsdl3-0 libvulkan1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY Yakumo /opt/yakumo/Yakumo
+COPY lib/ /opt/yakumo/lib/
+USER nobody
+ENV HOME=/tmp
+EXPOSE 27312 27313
+ENTRYPOINT ["/opt/yakumo/Yakumo", "--adhoc-server"]
